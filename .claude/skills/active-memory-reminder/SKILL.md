@@ -14,7 +14,7 @@ to read; an absent file is not a reason to create another state ledger.
 Loopkit splits shift-notes across two files on purpose:
 
 - **`claude-progress.txt`** — free-form prose. Human-readable narrative of what the last session did, what is in flight, what to pick up next. Wins for context and intent. Loses when the model needs to _decide_ whether a decision was made.
-- **`claude-decisions.json`** — machine-readable array of `{ts, decision}` entries, appended by the loopkit `pre-compact` hook every time the transcript is about to be compacted. Wins for durability of specific choices ("chose Postgres over SQLite because…", "rejected the polling approach", "tried htmx and switched to Alpine").
+- **`claude-decisions.json`** — machine-readable array of `{ts, decision}` entries, appended by the loopkit `pre-compact` hook every time the transcript is about to be compacted. Wins for durability of specific choices ("chose Parakeet over Whisper for live transcription because…", "rejected the polling approach", "tried a shared lock and switched to a channel").
 
 Compaction is where reasoning dies. The summarizer keeps the shape of the work but strips the _why_. `claude-decisions.json` is the durable side-channel that survives that. This is the same pattern Meta's NapMem paper calls out for behavioral-state-decay in long-running agents: prose degrades faster than structured facts because the model rewrites prose freely and edits structured data carefully (also why loopkit uses JSON for `feature_list.json`; see [feature-list-json](../feature-list-json/SKILL.md)).
 

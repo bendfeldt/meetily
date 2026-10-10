@@ -3,14 +3,15 @@
 # Project: meetily (fork)
 
 Privacy-first meeting assistant: capture, transcribe and summarize meetings
-locally. Tauri 2 desktop app; the Rust core owns audio, transcription,
-storage and summary orchestration, the Next.js UI talks to it via Tauri
-commands and events. Architecture reference: the upstream root `CLAUDE.md`
+locally. A Rust-first Tauri 2 desktop app: the Rust core owns audio,
+transcription, storage and summary orchestration; a Next.js UI renders it
+and talks to the core via Tauri commands and events. Architecture reference: the upstream root `CLAUDE.md`
 (loaded alongside this file; parts of it, such as the "Current" branch
 name, may be stale).
 
-Stack: Rust (Tauri 2, cpal, whisper-rs, ONNX/Parakeet, sqlx + SQLite),
-Next.js 14 + React 18 + TypeScript, pnpm, Bun for tests.
+Stack: Rust 2021 edition (Tauri 2, tokio, cpal, whisper-rs, ONNX Runtime for
+Parakeet, sqlx + SQLite, anyhow) is the core. UI: Next.js 14 + React 18 +
+TypeScript, pnpm, Bun for UI tests. Most behavior changes belong in Rust.
 
 Layout:
 
@@ -37,6 +38,10 @@ Layout:
   core, registered in `lib.rs`.
 - Rust errors use `anyhow::Result` internally and `Result<_, String>` at the
   command boundary; UI errors are user-friendly toasts, not raw traces.
+- Shared state: `Arc<RwLock<T>>` across async tasks, `Arc<AtomicBool>` for
+  flags. Don't hold a lock across `.await` or inside audio callbacks.
+- Rust tests go in an inline `#[cfg(test)] mod tests` beside the code
+  (`#[tokio::test]` for async), matching the existing modules.
 - Audio naming: "microphone" and "system", not "input"/"output". Hot-path
   logging uses `perf_debug!` / `perf_trace!`.
 - Use Tauri path APIs; never hardcode platform paths.

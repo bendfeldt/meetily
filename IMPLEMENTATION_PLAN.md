@@ -6,8 +6,8 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 ## Current state
 
 - `main` mirrors upstream `Zackriya-Solutions/meetily` at v0.4.1.
-- Agentic workflow (loopkit skills, `/spec` `/verify` `/polish` `/next`,
-  verifier subagent, hooks) migrated from `bendfeldt/fabric-connect`.
+- Agentic workflow installed: loopkit skills, `/spec` `/verify` `/polish`
+  `/next`, verifier subagent, SessionStart/PreCompact hooks.
 - No fork-specific runtime changes.
 
 ## Next steps

@@ -11,6 +11,6 @@ Write a short file `docs/decisions/NNN-<slug>.md`:
 - **Context** — what forced a decision. The constraints.
 - **Options** — the 2-3 real candidates, one line each.
 - **Decision** — what you picked, dated.
-- **Why** — the tradeoff. What you gave up. "We picked Postgres over Mongo because we need real joins; we accept heavier ops."
+- **Why** — the tradeoff. What you gave up. "We embed sqlx migrations and run them on app start because every install owns its own SQLite file; we accept that migrations must be forward-only."
 - **Consequences** — what this now makes easy and hard.
   Hard-to-reverse choices (schema, auth, data store) MUST get one. Future-you will ask "why on earth did we do this" — answer it now.

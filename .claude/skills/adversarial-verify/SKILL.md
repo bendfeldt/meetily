@@ -38,7 +38,7 @@ Do not be polite. Do not propose fixes. Do not run the code. Just hunt.
   "passes": false,
   "failures": [
     {
-      "file": "src/example.ts",
+      "file": "frontend/src-tauri/src/audio/pipeline.rs",
       "line": 42,
       "shortcut": "swallowed errors",
       "why": "..."
