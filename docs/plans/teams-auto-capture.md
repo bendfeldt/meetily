@@ -17,8 +17,11 @@ Obsidian vault).
 
 1. Within ~2 s of Teams taking the microphone (start delay 1.5 s, 0.5 s
    polling), a small "Teams meeting detected — Record / Not now" pop-up
-   appears on top of all windows, including full-screen apps, on the
-   current Space. It does not steal keyboard focus from Teams.
+   appears on top of all windows, **including full-screen apps** (Teams or
+   anything else in its own full-screen Space), on the display with the
+   pointer. Showing it or clicking it never switches Space, never pulls
+   meetily's main window forward, and never takes keyboard focus from
+   Teams.
 2. "Record" starts a record-only meeting recording at once. "Not now" (or
    Esc) closes the pop-up, and it stays quiet until Teams releases the mic
    and takes it again (the next meeting). If Teams releases the mic before
@@ -27,15 +30,19 @@ Obsidian vault).
    Teams releasing the microphone, exactly like a detected meeting end.
    Recordings started from the main window or tray are never auto-stopped.
    The user can still stop a pop-up recording early by hand.
-4. After stop, the saved audio is transcribed in one batch, the meeting gets
+4. An empty pop-up recording is deleted: no audio frames, or no speech
+   after transcription. The meeting row and its audio folder are removed,
+   no summary or note is made, and a notification says "Teams meeting had
+   no speech, recording deleted".
+5. After stop, the saved audio is transcribed in one batch, the meeting gets
    its full transcript and (if auto-summary is on) a summary. This works
    with the window hidden or closed to the tray.
-5. A file `<vault folder>/YYYY-MM-DD HHmm - <title>.md` exists with YAML
+6. A file `<vault folder>/YYYY-MM-DD HHmm - <title>.md` exists with YAML
    frontmatter, the summary and the timestamped transcript, and opens
    cleanly in Obsidian. Regenerating the summary updates that same file.
-6. All of it can be switched off in Settings. Off by default. Manual
+7. All of it can be switched off in Settings. Off by default. Manual
    recordings keep today's live transcription.
-7. `cargo check`, `cargo test` (new detector and export tests),
+8. `cargo check`, `cargo test` (new detector and export tests),
    `tsc --noEmit` and `.claude/scripts/frontend-tests.sh` pass. Detection is
    confirmed by hand on a real Teams call on macOS.
 
@@ -107,8 +114,8 @@ Dismissed --(Teams released mic ≥ end_grace)--> Idle
 - The pop-up usually appears on the pre-join screen (Teams turns the mic on
   there for its level meter). That is the right moment to ask: the user
   decides before joining, and nothing is recorded until they click Record.
-  There is no auto-delete of short recordings; every recording now has the
-  user's explicit yes.
+  Recordings that turn out empty (backed out of the pre-join screen,
+  nobody spoke) are deleted after the meeting; see section 4.
 - "Dismissed" is keyed to the mic session, not a timer: no second pop-up
   for the same meeting, even if the user stops a recording early.
 - A 5 s end grace period means a short mic drop (switching headset,
@@ -130,16 +137,35 @@ Dismissed --(Teams released mic ≥ end_grace)--> Idle
 
 **The pop-up.** A second Tauri window, `meeting-prompt`, created once at
 startup and hidden, with a tiny page (`frontend/src/app/meeting-prompt/`):
-- Window: about 360×120 px, no decorations, `always_on_top`,
-  `visible_on_all_workspaces`, `skip_taskbar`, placed top-right of the
-  screen with the pointer. Shown with `show()` but **not** `set_focus()`,
-  so typing in Teams is never interrupted. Clicking it works without focus.
-- To appear over full-screen apps, macOS needs a window level above normal
-  and the full-screen-auxiliary collection behavior. Tauri's
-  `always_on_top` plus `visible_on_all_workspaces` covers normal Spaces. If
-  it does not show over a full-screen Teams window, set the NSWindow
-  collection behavior through `objc`, which is already a macOS dependency.
-  Verify on a real full-screen call.
+- Window: about 360×120 px, no decorations, transparent background,
+  `skip_taskbar`, created with `focused(false)`, placed top-right of the
+  display with the pointer.
+- **On top of full-screen apps (required).** A plain Tauri window with
+  `always_on_top` + `visible_on_all_workspaces` stays out of another app's
+  full-screen Space, and clicking it activates meetily, which makes macOS
+  jump to meetily's own Space. So the prompt is turned into a
+  non-activating `NSPanel` right after creation, in
+  `src/meeting_prompt_macos.rs` (~40 lines, `objc`, already a macOS
+  dependency, same technique as the `tauri-nspanel` crate):
+  - swap the window's class to an `NSPanel` subclass that returns `YES` from
+    `canBecomeKeyWindow` (so the buttons and Esc work) and `NO` from
+    `canBecomeMainWindow`;
+  - style mask `NSWindowStyleMaskNonactivatingPanel`, so clicking it does
+    not activate meetily or switch Space;
+  - collection behavior `canJoinAllSpaces | fullScreenAuxiliary |
+    stationary | ignoresCycle`, so it is present on every Space including
+    full-screen ones and stays out of Cmd-` cycling;
+  - window level `NSStatusWindowLevel` (above full-screen app windows, below
+    system alerts), `hidesOnDeactivate = NO`;
+  - show with `orderFrontRegardless`, never `makeKeyAndOrderFront`, so
+    focus stays in Teams until the user clicks the pop-up.
+  If the hand-rolled panel misbehaves, switch to the `tauri-nspanel` crate
+  (git dependency, justified in the commit) instead of patching around it.
+- Acceptance test on a real Mac, all must pass before step 3 is done:
+  Teams full-screen in its own Space (pop-up visible, click Record, still
+  in the Teams Space, Teams still has focus); Keynote/browser full-screen;
+  normal desktop; second display; pop-up while typing in Teams chat (no
+  keystrokes lost).
 - Content: "Teams meeting detected", the time, and two buttons: **Record**
   (default) and **Not now**. Esc means Not now. Accessible names and
   keyboard focus order per `a11y-pass`. A short sound is optional and off
@@ -147,9 +173,9 @@ startup and hidden, with a tiny page (`frontend/src/app/meeting-prompt/`):
 - It answers with a Tauri command `meeting_prompt_respond(record: bool)`
   that feeds the state machine. Hide happens from Rust, so the pop-up also
   closes when the meeting ends first.
-- Fallback when the window can't be shown (e.g. permissions or a broken
-  window): a regular system notification, "Teams meeting detected, open
-  meetily to record". No auto-record.
+- Fallback only if the panel fails to build at startup (logged): a regular
+  system notification, "Teams meeting detected, open meetily to record".
+  No auto-record.
 
 **Start (after Record):** emit the same event the tray emits, with the
 meeting name `Teams meeting <local date time>` and a `record_only` flag.
@@ -183,9 +209,21 @@ When it is set:
 
 **After-meeting pipeline (Rust, `audio/after_meeting.rs`)**, run once the
 meeting row exists:
+0. If the saved audio is missing or has no frames (recording stopped before
+   any audio arrived), delete the meeting and its folder and stop.
 1. `start_retranscription(meeting_id, folder_path, language, model,
    provider)` with the user's configured transcription model. It writes the
    transcripts table itself and emits progress events the UI already shows.
+   **Empty check:** if transcription succeeded but produced no segments with
+   non-whitespace text, the recording is empty: delete the meeting row
+   (transcripts cascade) and its audio folder, notify "Teams meeting had no
+   speech, recording deleted", and stop. Whisper sometimes "hears" filler
+   in silence ("Thank you.", "you"), so the check also treats a transcript
+   under ~3 words in total as empty. Mark it with
+   `shortcut: word-count emptiness check, use VAD speech duration if real meetings get deleted`.
+   A transcription *failure* is never treated as empty: the audio is kept.
+   Only pop-up recordings are auto-deleted; manual recordings are never
+   deleted automatically.
 2. If auto-summary is on, run the summary through the service behind
    `api_process_transcript` and wait for it to finish or fail.
 3. Export the Markdown note (section 5), with or without a summary.
@@ -286,12 +324,21 @@ Each step runs `/spec` → implement → checks → `/verify`, and ends with
   Record, not when the meeting was detected. Usually that is before
   joining, so nothing is missed. If it matters later, keep a few seconds of
   pre-roll from detection; mark with a `shortcut:` comment.
-- **Pop-up over full-screen Teams** depends on macOS window level and
-  collection behavior. Verify on a real call; the `objc` fallback is
-  described in section 3.
+- **Pop-up over full-screen apps** relies on the NSPanel conversion
+  (private-ish AppKit usage through `objc`; the app already enables
+  `macos-private-api`). It can only be verified on a real Mac; the
+  acceptance test in section 3 is the gate.
 - **Does Teams hold the mic from pre-join straight into the meeting?** If it
   briefly releases it on "Join now", the 5 s grace bridges that. Verify on a
   real call in step 3.
+- **Deleting the wrong thing.** Auto-delete only runs on pop-up recordings,
+  only after a successful transcription, and only when the transcript is
+  empty or nearly so. The existing `MeetingsRepository::delete_meeting`
+  removes only the DB rows, not audio. So the pipeline reads the meeting's
+  `folder_path` first, deletes the rows, then removes that folder only if it
+  sits inside the configured recordings folder (canonicalized path check).
+  No path guessing. Unit-test the emptiness rule
+  on fixtures (silence, Whisper filler, one real sentence).
 - **Two calls back to back** more than 5 s apart get two pop-ups and two
   notes; closer than that, one. Acceptable.
 - **Frontend-owned save.** The meeting row is still created by the webview

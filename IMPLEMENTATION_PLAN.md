@@ -17,7 +17,9 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   `docs/plans/teams-auto-capture.md`. Decided: macOS, transcribe after
   the meeting, start ~1.5 s / stop 5 s. Step 1 (manual Markdown export)
   goes first. Recording starts only after the user says yes in a pop-up;
-  pop-up recordings auto-stop when Teams releases the mic.
+  pop-up recordings auto-stop when Teams releases the mic. Pop-up must show
+  over full-screen apps (non-activating NSPanel); empty pop-up recordings
+  are deleted.
 
 ## Evidence gaps
 
