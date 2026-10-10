@@ -912,6 +912,7 @@ pub async fn api_save_meeting_title<R: Runtime>(
     let pool = state.db_manager.pool();
     match MeetingsRepository::update_meeting_title(pool, &meeting_id, &title).await {
         Ok(true) => {
+            crate::obsidian_export::spawn_sync_if_exported(_app, pool.clone(), meeting_id.clone());
             log_info!("Successfully saved meeting title");
             Ok(serde_json::json!({"message": "Meeting title saved successfully"}))
         }

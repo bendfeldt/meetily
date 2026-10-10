@@ -6,6 +6,7 @@ import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
+import { ExportToObsidianButton } from './ExportToObsidianButton';
 import { useConfig } from '@/contexts/ConfigContext';
 
 
@@ -68,6 +69,8 @@ export function TranscriptButtonGroup({
           <FolderOpen className="@[22rem]:mr-2" size={18} />
           <span className="hidden @[22rem]:inline">Recording</span>
         </Button>
+
+        {meetingId && <ExportToObsidianButton meetingId={meetingId} />}
 
         {betaFeatures.importAndRetranscribe && meetingId && meetingFolderPath && (
           <Button
