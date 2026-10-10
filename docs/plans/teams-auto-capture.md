@@ -1,7 +1,7 @@
 # Plan: Teams meeting prompt → record → transcribe after → Obsidian note
 
 Status: proposed, not started. Fork-only feature (`bendfeldt/meetily`).
-Revision 2: reviewed against the upstream code, the Apple/Tauri/cidre sources
+Revision 3: reviewed (twice, by independent verifiers) against the upstream code, the Apple/Tauri/cidre sources
 and Ponytail ultra; see "Review log" at the end.
 
 ## Decisions (from the user)
@@ -28,19 +28,23 @@ and Ponytail ultra; see "Review log" at the end.
    while the pop-up is up and after it closes).
 3. **Record** starts a record-only recording named `Teams meeting <date
    time>`. **Not now** closes the pop-up; no new pop-up until Teams releases
-   the mic and takes it again. If Teams releases the mic first, or a
-   recording is started some other way, the pop-up closes by itself.
+   the mic and takes it again. If Teams releases the mic for 5 s before the
+   user answers, or a recording is started some other way, the pop-up
+   closes by itself. This works whatever page meetily's window shows, and
+   with the window hidden.
 4. A pop-up recording stops within ~5 s of Teams releasing the microphone. A
    recording started any other way is never stopped by the detector.
 5. After a pop-up recording stops, the meeting is saved, its audio is
-   transcribed in one batch with the user's selected transcription model,
-   and the meeting page opens (existing auto-summary then applies).
+   transcribed in one batch with the configured transcription model and
+   language, the note is written, and the meeting appears in the sidebar.
+   If auto-summary is on, the meeting page opens and summarizes as today.
 6. Any recording (pop-up or manual) whose audio or transcript is empty is
    deleted: DB rows and its audio folder. A failed transcription is never
    treated as empty.
 7. A note `<export folder>/YYYY-MM-DD HHmm - <title>.md` with YAML
    frontmatter, summary (when one exists) and timestamped transcript is
-   written after transcription, and rewritten when a summary completes.
+   written after transcription, and rewritten when a summary completes,
+   even if the user has left the meeting page.
 8. `cargo check`, `cargo test`, `cargo clippy` (changed code),
    `pnpm exec tsc --noEmit` and `.claude/scripts/frontend-tests.sh` pass, and
    the real-Mac acceptance list in step 3 passes.
@@ -58,7 +62,8 @@ and Ponytail ultra; see "Review log" at the end.
 - The step 0 spike shows Teams does not hold the mic for the whole call
   (e.g. releases it when muted). The detection design is then wrong; re-plan.
 - The NSPanel cannot be shown over a full-screen Space on the user's macOS
-  version. Report; do not ship a pop-up that fails requirement 1.
+  version. Report; do not ship a pop-up that fails requirement 1, and do not
+  substitute a notification.
 - A change would need a schema migration. None is planned.
 
 ## What exists upstream (verified)
@@ -66,20 +71,27 @@ and Ponytail ultra; see "Review log" at the end.
 | Need | Code | Notes |
 |---|---|---|
 | Per-process audio state | `cidre` at the pinned rev `a9587fa`: `core_audio::System::processes()`, `Process::{pid, bundle_id, is_running_input, is_running_output}` (`cidre/src/core_audio/hardware.rs`) | Wraps `kAudioHardwarePropertyProcessObjectList` and `kAudioProcessPropertyIsRunningInput`. meetily only uses the output side today (`audio/system_detector.rs:358`). |
-| Tray start | `tray.rs:105-112` sets `sessionStorage.autoStartRecording` and reloads `/`; `useRecordingStart.ts:214` picks it up and runs `checkModelReady` first | Not an event. It also focuses the main window. **Not reused**; see section 3. |
-| Stop + save | Stop button → `useRecordingStop`: waits for live transcripts, `api_save_transcript` (no length check), marks IndexedDB recovery entry saved, navigates to `/meeting-details?source=recording` | Save is gated on `transcriptionComplete` (`useRecordingStop.ts:236`). |
+| Tray start | `tray.rs:105-112` sets `sessionStorage.autoStartRecording` and reloads `/`; `useRecordingStart.ts:214` picks it up and runs `checkModelReady` first | Not an event; focuses the main window. `useRecordingStart` is mounted only on the home page and its start function takes no name. **Not reused.** |
+| Rust start | `recording_commands.rs:495 start_recording_with_devices_and_meeting(app, mic, system, meeting_name)` → validates the configured model (`transcription/engine.rs:55`), starts `RecordingManager`, calls `start_transcription_task` (`:618`), emits `recording-started` | The UI's `RecordingStateContext` follows `recording-started` / `recording-stopped` events, so a Rust-started recording shows up in the UI on any page. |
+| Stop | `recording_commands.rs:676 stop_recording` → `Result<(), String>`, emits `recording-stopped { folder_path, meeting_name }` (`:1084`). Tray stop then emits `recording-stop-complete`, which the layout-level `RecordingPostProcessingProvider` turns into `useRecordingStop` (save + navigate) | With no audio checkpoints the stop fails ("No audio checkpoints to merge", `incremental_saver.rs`). |
+| Save | `useRecordingStop`: waits for live transcripts, `api_save_transcript` (no length check), marks IndexedDB recovery entry saved, schedules navigation to `/meeting-details?source=recording` after 2 s | Save only runs when `transcriptionComplete` (`useRecordingStop.ts:236`); else the status goes to IDLE with no save. |
+| Transcription config in Rust | `api::api_get_transcript_config` (provider + model, from the DB) and `get_language_preference_internal()` (`lib.rs:125`) | Rust can run a batch job with the same model and language as live transcription, without the UI. |
+| Recordings root | `recording_saver.rs:226` always uses `get_default_recordings_folder()` | `RecordingPreferences.save_folder` is not used by the writer. |
 | Auto-summary | `meeting-details/page.tsx` when `source=recording` and `useConfig().isAutoSummary` | `isAutoSummary` lives in `localStorage`, **default off**. Rust cannot read it. |
-| Batch transcription | `start_retranscription_command(meeting_id, meeting_folder_path, language, model, provider)`, emits `retranscription-complete` / `retranscription-error`; used by `RetranscribeDialog.tsx` | Replaces the meeting's rows in `transcripts` itself. One job at a time (returns an error if busy). |
+| Batch transcription | `retranscription::start_retranscription(app, meeting_id, folder_path, language, model, provider) -> Result<RetranscriptionResult>` (async, awaitable); the `_command` wrapper spawns it and reports via events | Replaces the meeting's rows in `transcripts`. A guard allows one job at a time; acquired inside the spawned task, so the command wrapper can return Ok and fail later. Parakeet gets `language = None` (`RetranscribeDialog.tsx:207`). "No audio file found" is reported as an error. |
 | Meeting delete | `MeetingsRepository::delete_meeting` | Deletes DB rows only, not the audio folder. `meetings.folder_path` exists. |
-| Window close | `lib.rs:601` hides the main window instead of closing | The webview keeps running in the tray, so frontend-owned flows work with the window hidden. |
+| Summary completion | `summary/service.rs process_transcript_background` writes the result to `summary_processes` | The Rust place where every summary finishes, whether or not a page is open. |
+| Window close | `lib.rs:604` hides the main window instead of closing | The webview keeps running in the tray, so frontend-owned flows work with the window hidden. |
 | Pipeline → transcription | `pipeline.rs:877, 947` `transcription_sender.send(..)`, `warn!` on failure | With no receiver this would warn on every speech segment. |
 
 ## Design
 
-Principle (Ponytail ultra): reuse the frontend flows upstream already owns
-(start, save, summary, retranscribe) and add only what is missing: a
-detector, a pop-up, a record-only switch, an emptiness check, and the
-Markdown writer. No new Rust orchestration of summaries.
+Principle (Ponytail ultra): the pop-up path needs no page to be open, so it
+lives in Rust and calls the existing Rust functions directly (start, stop,
+save, batch transcription). The manual path stays as upstream wrote it and
+only gains the empty check. Summaries stay where they are (frontend-started,
+LLM config held by the UI); the only Rust hook there is the note export when
+a summary finishes.
 
 ### 0. Spike first (real Mac, ~30 min, throwaway)
 
@@ -101,17 +113,24 @@ If not, stop and re-plan.
   `kAudioProcessPropertyIsRunningInput` do not fire reliably, and the scan
   is a handful of objects.
 - **State machine**, pure and fed by `(now, holds_mic)` samples plus events
-  `record`, `dismiss`, `recording_started_elsewhere`; it returns actions:
+  `record`, `dismiss`, `recording_started_elsewhere`, `start_failed`,
+  `recording_stopped_elsewhere`; it returns actions:
 
   ```
   Idle      --mic held ≥ 1.5 s, no recording running--> Prompting   [show_prompt]
-  Prompting --record-->                               Recording   [hide_prompt, start]
-  Prompting --dismiss / recording started elsewhere--> Dismissed  [hide_prompt]
+  Prompting --record-->                               Starting    [hide_prompt, start]
+  Prompting --dismiss / recording_started_elsewhere--> Dismissed  [hide_prompt]
   Prompting --mic released ≥ 5 s-->                   Idle        [hide_prompt]
+  Starting  --recording-started for our meeting-->     Recording
+  Starting  --start_failed-->                         Dismissed   [notify error]
   Recording --mic released ≥ 5 s-->                   Idle        [stop]
-  Recording --stopped by the user-->                  Dismissed
+  Recording --recording_stopped_elsewhere-->          Dismissed   (user stopped it)
   Dismissed --mic released ≥ 5 s-->                   Idle
   ```
+
+  `recording_started_elsewhere` / `recording_stopped_elsewhere` come from
+  the existing `recording-started` / `recording-stopped` events (any
+  source), compared against the detector's own meeting.
 
   Constants, not settings: `START_DELAY = 1.5 s`, `END_GRACE = 5 s`,
   `POLL = 0.5 s`. A mic drop longer than 5 s (headset switch) ends the
@@ -119,13 +138,13 @@ If not, stop and re-plan.
   `shortcut: 5 s end grace splits a meeting on device switches, raise END_GRACE if it happens often`.
 - Unit tests: start delay, end grace, flapping around 5 s, dismiss lasts the
   whole mic session, release while prompting, recording started elsewhere
-  while prompting, user stops a pop-up recording early.
+  while prompting, start failure, user stops a pop-up recording early.
 - **macOS version:** process objects need macOS 14 (Sonoma) or later (the
   process properties first appear in the macOS 14 SDK). On older versions
   the toggle is disabled with a one-line explanation. Confirm the exact
   minor version against `AudioHardware.h` when building.
-- Runs only while the "Ask to record Teams meetings" toggle is on (stored
-  with the recording preferences, default off).
+- Runs only while the "Ask to record Teams meetings" toggle is on (see
+  section 6 for storage, default off).
 
 ### 2. Pop-up (Rust + one small page)
 
@@ -154,64 +173,98 @@ If not, stop and re-plan.
 - Page `frontend/src/app/meeting-prompt/page.tsx`: "Teams meeting detected",
   **Record** and **Not now**, accessible names (`a11y-pass`). Buttons call
   `meeting_prompt_respond(record: bool)`.
-- If the panel cannot be created at startup, log it and use a plain
-  notification ("Teams meeting detected, open meetily to record") instead.
+- If the panel cannot be created at startup, the detector does not run and
+  Settings shows "Pop-up unavailable" with the logged reason. No silent
+  substitute (see Stop if).
 
-### 3. Start and stop (frontend-owned, like upstream)
+### 3. Start and stop (Rust-owned for pop-up recordings)
 
-- Rust emits `teams-recording-requested { meeting_name }` to the main
-  window after Record, and `teams-meeting-ended` when the detector decides a
-  pop-up recording should stop.
-- `useRecordingStart` listens and runs its existing start function with the
-  given name and `recordOnly: true` (same device selection, `STARTING` state,
-  `checkModelReady` gate, error toasts). The model gate stays: batch
-  transcription needs the model later. It does **not** focus or reload the
-  main window (unlike the tray path).
-- `useRecordingStop` listens for `teams-meeting-ended` and runs the same stop
-  function as the Stop button.
-- Rust start command gets one new parameter `record_only: bool`. When true,
-  the transcription task is not started and the pipeline is told not to send
-  to the transcription channel (a flag next to `transcription_sender` in
-  `pipeline.rs`), so there is no per-segment warning. Audio is still saved;
-  `auto_save` is forced on for this recording.
-- The frontend remembers `recordOnly` for the current recording in its
-  recording state context, so `useRecordingStop` knows to skip the
-  "wait for live transcripts" step.
-- Any recording start notifies the detector (`recording_started_elsewhere`),
-  so an open pop-up closes and a late Record click is a no-op.
+- **Start:** after Record, `audio/meeting_detector.rs` calls
+  `start_recording_with_devices_and_meeting` with the preferred devices from
+  `RecordingPreferences` (`preferred_mic_device`, `preferred_system_device`,
+  `None` = default), the name `Teams meeting <date time>`, and the new
+  `record_only = true`. Model validation stays (the batch job needs the
+  model). An `Err` feeds `start_failed` and shows a notification with the
+  reason. The UI picks up the recording through the existing
+  `recording-started` event on whatever page is open; nothing is focused or
+  reloaded.
+- **`record_only` plumbing** (the real list of changes):
+  - `start_recording_with_devices_and_meeting` (`recording_commands.rs:495`)
+    gains `record_only: bool`; its Tauri-command wrapper in `lib.rs:364`
+    and the TS caller pass `false`, as do `start_recording` (`lib.rs:141`)
+    and the other entry points. Both TS and Rust sides change together.
+  - When `record_only`: skip `start_transcription_task` (both call sites,
+    `recording_commands.rs:431` and `:618`), and force `auto_save = true`
+    instead of the preference read at `:562-569`.
+  - `RecordingManager::start_recording` (`recording_manager.rs:228`) and the
+    pipeline constructors (`pipeline.rs:715`, `:986`) get a
+    `send_to_transcription: bool` so the VAD path skips the send instead of
+    warning on every segment.
+  - `recording-started` and `recording-stopped` payloads gain
+    `record_only: bool` (additive JSON field, TS types updated).
+- **Stop:** on `[stop]` the detector awaits `stop_recording` itself (no
+  `recording-stop-complete`, so the frontend save path does not run for this
+  recording) and hands the folder path to the after-meeting worker
+  (section 4). The UI returns to idle through `recording-stopped`. The
+  frontend `useRecordingStop` ignores a `recording-stopped` with
+  `record_only: true`, so no IndexedDB recovery entry is left behind for it
+  (check what the recovery store writes during a record-only recording, and
+  clear it on `meeting-ready`).
+- **Stop failure "No audio checkpoints to merge":** nothing was recorded.
+  Remove the meeting folder (recordings-root guard, section 4) and notify
+  "Recording was empty, deleted". No DB row exists.
+- **Manual stop of a pop-up recording** (Stop button or tray): runs the
+  existing frontend path. `useRecordingStop` sees `record_only: true` in
+  `recording-stopped` and, instead of waiting for live transcripts and
+  saving, invokes `queue_after_meeting(folder_path, meeting_name)` so the
+  same Rust worker takes over.
 
 ### 4. After stop
 
-**Pop-up recording (record-only)** in `useRecordingStop`:
-1. Save the meeting as today (zero transcripts) and mark the IndexedDB
-   recovery entry saved.
-2. `start_retranscription_command` with the user's selected transcription
-   model/provider/language, as `RetranscribeDialog` does. If another
-   retranscription is running, queue it in the frontend (a simple array; one
-   job at a time).
-3. On `retranscription-complete`: run the empty check (below). If kept,
-   export the note, then navigate to `/meeting-details?source=recording` so
-   the existing auto-summary runs when the user has it on.
-4. On `retranscription-error`: keep meeting and audio, toast "Transcription
+**Pop-up recording: Rust worker (`audio/after_meeting.rs`).** One
+`tokio::sync::Mutex`-guarded worker, jobs processed in order:
+1. Save the meeting via the same function `api_save_transcript` uses, with
+   zero transcripts and the folder path.
+2. Await `retranscription::start_retranscription` (not the `_command`
+   wrapper) with `api_get_transcript_config` provider/model and
+   `get_language_preference_internal()` (`None` for Parakeet). Awaiting it
+   directly removes the event-filtering and "Ok then fails later" problems.
+   If the meeting page's Retranscribe dialog holds the guard, wait and retry
+   (the guard error is distinguishable).
+3. Empty check (below). "No audio file found" counts as empty, any other
+   error is a failure: keep the meeting and audio, notify "Transcription
    failed, retry from the meeting page", export a note without transcript.
+4. Export the note (section 5).
+5. Emit `meeting-ready { meeting_id }`. The layout-level
+   `RecordingPostProcessingProvider` refreshes the sidebar and, if
+   `isAutoSummary` is on, navigates to `/meeting-details?id=…&source=recording`
+   so the existing auto-summary runs.
 
-**Manual recording (live)**: after the existing save, run the empty check
-unless a `transcription-error` event was seen during this recording; then
-export the note; then navigate as today.
+Engine sharing: pop-up recordings use no live engine, so back-to-back Teams
+meetings never clash with the worker. A *manual* live recording started
+while a batch job runs shares the engine; that is possible today with the
+Retranscribe dialog too. The worker does not start a new job while a live
+recording runs, and step 2 tests "manual recording during batch job" on a
+real Mac before shipping.
 
-**Empty check**: Rust command `discard_meeting_if_empty(meeting_id) ->
-bool`. It re-reads the transcripts from SQLite. Empty means no segments, or
+**Manual recording (live)**, in `useRecordingStop` after the existing save
+succeeds: unless a `transcription-error` was seen during this recording,
+await `discard_meeting_if_empty(meeting_id)` **before** scheduling the
+2 s navigation. If it returns `true`: toast "Recording had no speech,
+deleted", navigate home, skip the meeting-page navigation. Otherwise export
+the note and continue as today. If transcription never completed, today's
+code saves nothing; that stays as is.
+
+**Empty check**, Rust `discard_meeting_if_empty(meeting_id) -> bool`, used
+by both paths. It re-reads transcripts from SQLite. Empty = no segments or
 under 3 words in total (Whisper invents "Thank you." in silence):
 `shortcut: word-count emptiness, use VAD speech duration if real meetings get deleted`.
-If empty: read `folder_path`, delete via `MeetingsRepository::delete_meeting`,
-then remove the folder only if its canonical path is inside the configured
-recordings folder. Returns `true` when deleted; the caller then toasts
-"Recording had no speech, deleted" and goes home instead of to the meeting
-page. Unit-tested on: no rows, filler only, one real sentence, folder
-outside the recordings root (not removed).
-
-No-audio case: if the stop result reports no audio file, skip
-transcription and delete the same way.
+If empty: read `meetings.folder_path`, delete rows with
+`MeetingsRepository::delete_meeting`, then `remove_dir_all` the folder only
+if its canonical path is inside canonical `get_default_recordings_folder()`
+(the root the writer actually uses). File removal is new code; unit-tested
+on: no rows, filler only, one real sentence, folder outside the root (kept),
+symlink pointing outside the root (kept).
 
 ### 5. Obsidian Markdown export
 
@@ -219,9 +272,12 @@ transcription and delete the same way.
   `src/obsidian_export.rs`. Pure helpers `render_markdown(..)` and
   `safe_file_name(..)` with unit tests (frontmatter escaping, empty summary,
   odd title characters `* " \ / < > : | ? # ^ [ ]`, length cap).
-- Called after save/transcription (section 4) and again from
-  `useSummaryGeneration` when a summary reaches `completed`, so the note
-  picks up the summary.
+- Called by the after-meeting worker, by the manual path after the empty
+  check, and from Rust at the end of a successful
+  `process_transcript_background` (`summary/service.rs`), so a summary that
+  finishes after the user left the page still updates the note. Export
+  errors are logged and shown once as a notification; they never fail the
+  summary.
 - File `YYYY-MM-DD HHmm - <title>.md`; overwrite only if its frontmatter
   `meetily_id` matches, else add ` (2)`. Temp file + rename.
 - Frontmatter: `title`, `date`, `start`, `end`, `duration_min`, `source`
@@ -237,6 +293,13 @@ transcription and delete the same way.
   recording other people may require telling them.
 - "Obsidian export folder" (Choose…).
 
+Storage: both live in Rust because Rust reads them (detector, export). They
+are two new `#[serde(default)]` fields on `RecordingPreferences`
+(`teams_prompt_enabled: bool`, `obsidian_export_folder: Option<PathBuf>`).
+Older preference files load unchanged (serde defaults), and no DB migration
+is needed. This is a deliberate storage change, called out in the step 1
+commit.
+
 Auto-summary stays the existing toggle (default off). Without it, notes have
 the transcript and no summary until the user generates one.
 
@@ -244,9 +307,12 @@ the transcript and no summary until the user generates one.
 
 0. Spike (section 0). Throwaway; record findings in this file.
 1. Markdown export + export folder setting + empty check, wired into the
-   **manual** stop flow. Useful on its own; no detector needed.
-2. Record-only mode + after-stop flow for record-only recordings, testable
-   with a temporary dev trigger before the detector exists.
+   **manual** stop flow and the summary-completion hook. Useful on its own;
+   no detector needed.
+2. Record-only plumbing + after-meeting worker, testable with a temporary
+   dev trigger before the detector exists. Real-Mac checks: record-only
+   recording → note; manual stop of a record-only recording; manual live
+   recording during a batch job; empty record-only recording deleted.
 3. Detector + pop-up + start/stop wiring + toggle. Real-Mac acceptance:
    full-screen Teams in its own Space (pop-up visible; Record keeps you in
    that Space; typing in Teams chat keeps working); another full-screen app;
@@ -263,15 +329,41 @@ meetings, pre-roll audio before the click.
 - **Pop-up over full-screen** depends on AppKit panel behaviour; the real-Mac
   acceptance list is the gate. `tauri-nspanel` must build against tauri
   2.6.2; check before step 3.
-- **Frontend-owned flow** needs the webview alive. It is: closing the window
-  hides it (`lib.rs:601`). Quitting meetily mid-transcription leaves a saved
-  meeting with no transcript; the user can retranscribe from the meeting
-  page: `shortcut: no resume of interrupted batch transcription after quit`.
+- **Quitting mid-job.** Quitting meetily while the worker transcribes leaves
+  a saved meeting with no transcript; the user can retranscribe from the
+  meeting page: `shortcut: no resume of interrupted batch transcription after quit`.
+- **Fork divergence.** This feature edits upstream files (`recording_commands.rs`,
+  `recording_manager.rs`, `pipeline.rs`, `useRecordingStop.ts`,
+  `summary/service.rs`, `lib.rs`, `recording_preferences.rs`). Keep each
+  edit minimal and additive so upstream syncs conflict rarely; new logic goes
+  in new files.
 - **Audio before Record is lost.** Usually only pre-join.
 - **Deleting the wrong thing**: only after a successful transcription, only
   under 3 words, folder removal only inside the recordings root.
 
-## Review log (revision 2)
+## Review log
+
+### Revision 3 (second independent verifier, 19 findings, confirmed)
+
+Record-only meetings would never be saved (save gated on
+`transcriptionComplete`); `useRecordingStart` is home-page-only and takes
+no name; the Stop button, not `useRecordingStop`, calls `stop_recording`;
+the `record_only` plumbing touches three entry points, `RecordingManager`
+and both pipeline constructors; `RetranscribeDialog` picks its own model
+and Parakeet needs `language = None`; the retranscription command returns
+Ok before taking its guard and events need meeting-id filtering; stop
+returns no file and fails with no checkpoints; "No audio file found" is an
+error, not "empty"; the writer ignores `save_folder`; summary completion
+has no hook once the page unmounts; the 2 s navigation races the delete;
+`recordOnly` had nowhere to live; the notification fallback contradicted
+Stop if; missing `start_failed` / user-stop events; 5 s close delay
+unstated; engine sharing with a live recording; settings storage unstated.
+Fixed by moving the pop-up path into Rust (awaiting
+`start_retranscription` directly, model/language from Rust config), adding
+the `record_only` event field, the summary-completion export hook in
+`service.rs`, explicit storage, and the state-machine events above.
+
+### Revision 2
 
 - **Upstream code (independent verifier, 15 findings, all confirmed):** tray
   start is a sessionStorage flag + reload, not an event; auto-summary is a
