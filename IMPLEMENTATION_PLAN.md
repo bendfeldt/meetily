@@ -13,13 +13,11 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 
 ## Next steps
 
-- Proposed: Teams auto-capture with Obsidian Markdown export, see
-  `docs/plans/teams-auto-capture.md`. Decided: macOS, transcribe after
-  the meeting, start ~1.5 s / stop 5 s. Step 1 (manual Markdown export)
-  goes first. Recording starts only after the user says yes in a pop-up;
-  pop-up recordings auto-stop when Teams releases the mic. Pop-up must show
-  over full-screen apps (non-activating NSPanel); empty pop-up recordings
-  are deleted.
+- Proposed: Teams meeting prompt → record → transcribe after → Obsidian
+  note, see `docs/plans/teams-auto-capture.md` (revision 2, verified against
+  upstream code, Apple/Tauri/cidre sources, Ponytail ultra, loopkit).
+  Next: step 0 spike on a real Mac (which Teams process holds the mic, and
+  whether it stays held while muted), then step 1.
 
 ## Evidence gaps
 

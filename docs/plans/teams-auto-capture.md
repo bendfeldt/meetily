@@ -1,370 +1,302 @@
-# Plan: Teams auto-capture → transcript → Obsidian Markdown
+# Plan: Teams meeting prompt → record → transcribe after → Obsidian note
 
 Status: proposed, not started. Fork-only feature (`bendfeldt/meetily`).
-Decided: macOS first; transcription runs after the meeting, not live;
-detection after ~1.5 s asks before recording (pop-up), stop after 5 s.
+Revision 2: reviewed against the upstream code, the Apple/Tauri/cidre sources
+and Ponytail ultra; see "Review log" at the end.
 
-## Goal
+## Decisions (from the user)
 
-When a Microsoft Teams meeting starts on macOS, meetily shows a pop-up in
-front of everything asking whether to record it. If the user says yes, it
-records audio without live transcription. When the meeting ends, it
-stops, transcribes the saved recording, generates the summary, and writes
-one Markdown note per meeting into a local folder the user picks (their
-Obsidian vault).
+- macOS only.
+- When Teams takes the microphone, a pop-up asks whether to record. It must be
+  visible on top of everything, **including full-screen apps**.
+- A recording started from the pop-up stops by itself 5 s after Teams lets go
+  of the microphone. Manual recordings are never auto-stopped.
+- Pop-up recordings are transcribed **after** the meeting, not live. Manual
+  recordings keep today's live transcription.
+- Empty recordings (no audio, or no speech) are deleted, pop-up and manual.
+- One Markdown note per meeting, written to a local folder (Obsidian vault).
+- Timings: prompt ~1.5 s after Teams takes the mic; stop 5 s after release.
 
 ## Done when
 
-1. Within ~2 s of Teams taking the microphone (start delay 1.5 s, 0.5 s
-   polling), a small "Teams meeting detected — Record / Not now" pop-up
-   appears on top of all windows, **including full-screen apps** (Teams or
-   anything else in its own full-screen Space), on the display with the
-   pointer. Showing it or clicking it never switches Space, never pulls
-   meetily's main window forward, and never takes keyboard focus from
-   Teams.
-2. "Record" starts a record-only meeting recording at once. "Not now" (or
-   Esc) closes the pop-up, and it stays quiet until Teams releases the mic
-   and takes it again (the next meeting). If Teams releases the mic before
-   the user answers, the pop-up closes on its own.
-3. A recording started from the pop-up stops automatically within ~5 s of
-   Teams releasing the microphone, exactly like a detected meeting end.
-   Recordings started from the main window or tray are never auto-stopped.
-   The user can still stop a pop-up recording early by hand.
-4. An empty recording is deleted, whether it came from the pop-up or was
-   started by hand: no audio frames, or no speech after transcription. The
-   meeting rows and its audio folder are removed, no summary or note is
-   made, and a notification says "Recording had no speech, deleted". A
-   recording whose transcription *failed* is never deleted.
-5. After stop, the saved audio is transcribed in one batch, the meeting gets
-   its full transcript and (if auto-summary is on) a summary. This works
-   with the window hidden or closed to the tray.
-6. A file `<vault folder>/YYYY-MM-DD HHmm - <title>.md` exists with YAML
-   frontmatter, the summary and the timestamped transcript, and opens
-   cleanly in Obsidian. Regenerating the summary updates that same file.
-7. All of it can be switched off in Settings. Off by default. Manual
-   recordings keep today's live transcription.
-8. `cargo check`, `cargo test` (new detector and export tests),
-   `tsc --noEmit` and `.claude/scripts/frontend-tests.sh` pass. Detection is
-   confirmed by hand on a real Teams call on macOS.
+1. With "Ask to record Teams meetings" on, Teams taking the microphone shows
+   the pop-up within ~2 s, on the display with the pointer, above every
+   window including a full-screen Teams window in its own Space.
+2. Showing the pop-up and clicking its buttons never switches Space, never
+   activates meetily or pulls its main window forward, and never moves
+   keyboard focus away from Teams (typing in Teams chat continues to work
+   while the pop-up is up and after it closes).
+3. **Record** starts a record-only recording named `Teams meeting <date
+   time>`. **Not now** closes the pop-up; no new pop-up until Teams releases
+   the mic and takes it again. If Teams releases the mic first, or a
+   recording is started some other way, the pop-up closes by itself.
+4. A pop-up recording stops within ~5 s of Teams releasing the microphone. A
+   recording started any other way is never stopped by the detector.
+5. After a pop-up recording stops, the meeting is saved, its audio is
+   transcribed in one batch with the user's selected transcription model,
+   and the meeting page opens (existing auto-summary then applies).
+6. Any recording (pop-up or manual) whose audio or transcript is empty is
+   deleted: DB rows and its audio folder. A failed transcription is never
+   treated as empty.
+7. A note `<export folder>/YYYY-MM-DD HHmm - <title>.md` with YAML
+   frontmatter, summary (when one exists) and timestamped transcript is
+   written after transcription, and rewritten when a summary completes.
+8. `cargo check`, `cargo test`, `cargo clippy` (changed code),
+   `pnpm exec tsc --noEmit` and `.claude/scripts/frontend-tests.sh` pass, and
+   the real-Mac acceptance list in step 3 passes.
 
-## What already exists (reuse, don't rebuild)
+## Never touch
 
-| Need | Existing code |
-|---|---|
-| "Which app is using audio" on macOS | `audio/system_detector.rs`: CoreAudio process list via `cidre` (`list_system_audio_using_apps`, `is_running_output`). Registered as Tauri commands in `audio/system_audio_commands.rs`, but the UI never calls them. |
-| Start recording from outside the UI | `tray.rs` start handler emits an event the frontend start flow handles. |
-| Stop + save | `tray.rs::stop_recording_handler` → Rust `stop_recording`; the frontend `useRecordingStop` flushes transcripts, saves the meeting to SQLite and navigates with `source=recording`. |
-| Summary after recording | `meeting-details/page.tsx` auto-generates when `source=recording` and `api_get_auto_generate_setting` is on (default on). |
-| Batch transcription from the saved audio | `audio/retranscription.rs::start_retranscription` (meeting id + folder, language, model, provider). It replaces the meeting's rows in `transcripts` itself. |
-| Live transcription hook-up | `RecordingManager` creates the transcription channel; `audio/transcription/worker.rs::start_transcription_task` consumes it. Start currently always validates a model and starts this task. There is no record-only mode yet. |
-| Summary from Rust | `summary/commands.rs::api_process_transcript` (Tauri command; the service underneath can be called directly). |
-| Summary as Markdown | `summary_processes.result` carries a `markdown` field. The frontend has `blocksToMarkdownSafely` for BlockNote summaries. |
-| Folder picker, settings store, notifications | `tauri-plugin-dialog`, `tauri-plugin-store`, `tauri-plugin-notification` are already dependencies. |
+- `backend/` (archived), applied sqlx migrations, upstream release/CI files.
+- The live-transcription path for manual recordings, apart from the
+  empty-recording check after save.
+- Recording file locations, audio permissions handling, LLM credential
+  handling.
+
+## Stop if
+
+- The step 0 spike shows Teams does not hold the mic for the whole call
+  (e.g. releases it when muted). The detection design is then wrong; re-plan.
+- The NSPanel cannot be shown over a full-screen Space on the user's macOS
+  version. Report; do not ship a pop-up that fails requirement 1.
+- A change would need a schema migration. None is planned.
+
+## What exists upstream (verified)
+
+| Need | Code | Notes |
+|---|---|---|
+| Per-process audio state | `cidre` at the pinned rev `a9587fa`: `core_audio::System::processes()`, `Process::{pid, bundle_id, is_running_input, is_running_output}` (`cidre/src/core_audio/hardware.rs`) | Wraps `kAudioHardwarePropertyProcessObjectList` and `kAudioProcessPropertyIsRunningInput`. meetily only uses the output side today (`audio/system_detector.rs:358`). |
+| Tray start | `tray.rs:105-112` sets `sessionStorage.autoStartRecording` and reloads `/`; `useRecordingStart.ts:214` picks it up and runs `checkModelReady` first | Not an event. It also focuses the main window. **Not reused**; see section 3. |
+| Stop + save | Stop button → `useRecordingStop`: waits for live transcripts, `api_save_transcript` (no length check), marks IndexedDB recovery entry saved, navigates to `/meeting-details?source=recording` | Save is gated on `transcriptionComplete` (`useRecordingStop.ts:236`). |
+| Auto-summary | `meeting-details/page.tsx` when `source=recording` and `useConfig().isAutoSummary` | `isAutoSummary` lives in `localStorage`, **default off**. Rust cannot read it. |
+| Batch transcription | `start_retranscription_command(meeting_id, meeting_folder_path, language, model, provider)`, emits `retranscription-complete` / `retranscription-error`; used by `RetranscribeDialog.tsx` | Replaces the meeting's rows in `transcripts` itself. One job at a time (returns an error if busy). |
+| Meeting delete | `MeetingsRepository::delete_meeting` | Deletes DB rows only, not the audio folder. `meetings.folder_path` exists. |
+| Window close | `lib.rs:601` hides the main window instead of closing | The webview keeps running in the tray, so frontend-owned flows work with the window hidden. |
+| Pipeline → transcription | `pipeline.rs:877, 947` `transcription_sender.send(..)`, `warn!` on failure | With no receiver this would warn on every speech segment. |
 
 ## Design
 
-### 1. Detection signal: "Teams is holding the microphone"
+Principle (Ponytail ultra): reuse the frontend flows upstream already owns
+(start, save, summary, retranscribe) and add only what is missing: a
+detector, a pop-up, a record-only switch, an emptiness check, and the
+Markdown writer. No new Rust orchestration of summaries.
 
-When a call is live, Teams keeps an active microphone capture stream, even
-while you are muted. When you leave, it releases it. That is the most
-reliable signal that needs no new permissions. Rejected alternatives:
-- Window titles: localized, change with Teams versions, and need Screen
-  Recording/Accessibility permission on macOS.
-- Calendar or Graph API: needs an online account, which breaks local-first.
-- "Teams is playing audio": also true for notifications and video previews.
+### 0. Spike first (real Mac, ~30 min, throwaway)
 
-Per OS:
-- **macOS:** extend `system_detector.rs` with an input-side twin of
-  `list_system_audio_using_apps`. Use `process.is_running_input()` on
-  `ca::System::processes()` and match the bundle id (`com.microsoft.teams2`
-  for new Teams, `com.microsoft.teams` for classic). Poll every 0.5 s on a
-  background thread, which avoids a second CoreAudio listener. (The pinned
-  `cidre` rev is assumed to expose `is_running_input` next to
-  `is_running_output`; check that first.) Needs no new
-  permission. CoreAudio process objects need macOS 14.2+; on older versions
-  detection is off and Settings says so.
-- **Windows (later, not in this plan's scope):** enumerate WASAPI capture sessions
-  (`IAudioSessionManager2::GetSessionEnumerator` on the default capture
-  endpoint). Match `ms-teams.exe` (new) or `Teams.exe` (classic) by process
-  id, using `sysinfo`, which is already a dependency, for the name. State
-  must be `AudioSessionStateActive`. This needs the `windows` crate with
-  `Win32_Media_Audio`. It is already in the build through `cpal`; add it
-  as a direct Windows-only dependency and justify that in the commit.
-- **Linux:** out of scope. Teams on Linux is a browser PWA, so the mic owner
-  is the browser and can't be told apart from other tabs.
+A debug-only Tauri command that logs every 0.5 s, for each CoreAudio
+process: `bundle_id`, `pid`, `is_running_input`. Run it through: Teams idle,
+pre-join screen, joined, muted, unmuted, screen share, leave, a 1:1 call.
+Record which bundle id(s) hold input (new Teams may capture from a helper
+process, e.g. a `com.microsoft.teams2.*` WebView helper) and whether input
+stays on while muted. This turns the plan's two assumptions into facts. If
+they hold, the match rule is `bundle_id` starts with `com.microsoft.teams`.
+If not, stop and re-plan.
 
-The app match list is a setting (`["Microsoft Teams"]` by default). That
-makes Zoom or Webex a one-line config change later, with no new code.
+### 1. Detector (Rust, `audio/meeting_detector.rs`)
 
-### 2. Meeting state machine (Rust, one small module)
+- **Probe:** a function `teams_holds_microphone() -> bool` over
+  `cidre::core_audio::System::processes()`, true when any process whose
+  bundle id matches the spike's rule has `is_running_input()`. Polling every
+  0.5 s, not a property listener: Apple forum reports say listeners for
+  `kAudioProcessPropertyIsRunningInput` do not fire reliably, and the scan
+  is a handful of objects.
+- **State machine**, pure and fed by `(now, holds_mic)` samples plus events
+  `record`, `dismiss`, `recording_started_elsewhere`; it returns actions:
 
-`audio/meeting_detector.rs`:
+  ```
+  Idle      --mic held ≥ 1.5 s, no recording running--> Prompting   [show_prompt]
+  Prompting --record-->                               Recording   [hide_prompt, start]
+  Prompting --dismiss / recording started elsewhere--> Dismissed  [hide_prompt]
+  Prompting --mic released ≥ 5 s-->                   Idle        [hide_prompt]
+  Recording --mic released ≥ 5 s-->                   Idle        [stop]
+  Recording --stopped by the user-->                  Dismissed
+  Dismissed --mic released ≥ 5 s-->                   Idle
+  ```
 
-```
-Idle --(Teams holds mic ≥ start_delay, 1.5 s)--> Prompting
-Prompting --Record--> Recording (detector-owned)
-Prompting --Not now / Esc--> Dismissed
-Prompting --(Teams released mic ≥ end_grace)--> Idle      (pop-up closes)
-Recording --(Teams released mic ≥ end_grace, 5 s)--> Stopping --> Idle
-Recording --(user stops by hand)--> Dismissed
-Dismissed --(Teams released mic ≥ end_grace)--> Idle
-```
+  Constants, not settings: `START_DELAY = 1.5 s`, `END_GRACE = 5 s`,
+  `POLL = 0.5 s`. A mic drop longer than 5 s (headset switch) ends the
+  recording and the next grab prompts again:
+  `shortcut: 5 s end grace splits a meeting on device switches, raise END_GRACE if it happens often`.
+- Unit tests: start delay, end grace, flapping around 5 s, dismiss lasts the
+  whole mic session, release while prompting, recording started elsewhere
+  while prompting, user stops a pop-up recording early.
+- **macOS version:** process objects need macOS 14 (Sonoma) or later (the
+  process properties first appear in the macOS 14 SDK). On older versions
+  the toggle is disabled with a one-line explanation. Confirm the exact
+  minor version against `AudioHardware.h` when building.
+- Runs only while the "Ask to record Teams meetings" toggle is on (stored
+  with the recording preferences, default off).
 
-- Polling is every 0.5 s. One CoreAudio process scan is cheap (a short
-  list of objects), so this costs nothing noticeable.
-- The pop-up usually appears on the pre-join screen (Teams turns the mic on
-  there for its level meter). That is the right moment to ask: the user
-  decides before joining, and nothing is recorded until they click Record.
-  Recordings that turn out empty (backed out of the pre-join screen,
-  nobody spoke) are deleted after the meeting; see section 4.
-- "Dismissed" is keyed to the mic session, not a timer: no second pop-up
-  for the same meeting, even if the user stops a recording early.
-- A 5 s end grace period means a short mic drop (switching headset,
-  reconnect) ends the meeting and stops the recording, and the next mic
-  grab prompts again. Accepted for now; mark it with
-  `shortcut: 5 s end grace splits a meeting on device switches, raise end_grace if it happens often`.
-- Never prompt while any recording is running (manual or detector-owned).
-  Only a detector-owned recording is auto-stopped.
-- Start delay and end grace are settings with these defaults.
-- The detector is a pure state machine fed by `(now, teams_holds_mic)`
-  samples and user events (`record`, `dismiss`, `manual_stop`), returning
-  actions (`show_prompt`, `hide_prompt`, `start_recording`,
-  `stop_recording`). That makes it unit-testable with no audio hardware or
-  UI: start delay, end grace, flapping around the 5 s edge, dismiss for the
-  rest of the session, mic released while prompting, and the
-  manual-recording guard.
+### 2. Pop-up (Rust + one small page)
 
-### 3. Start and stop through the existing paths
+- A second window `meeting-prompt`, created hidden at startup:
+  360×110, no decorations, transparent, `skip_taskbar(true)`,
+  `focused(false)`, `accept_first_mouse(true)` (first click hits the
+  button), all verified on `WebviewWindowBuilder` in tauri 2.6.2.
+- Converted to an `NSPanel` with the `tauri-nspanel` crate (git, pinned to a
+  commit; it swizzles the Tauri `NSWindow` into an `NSPanel`). New
+  dependency, justified in the commit: the same conversion by hand means
+  registering an Objective-C subclass and swapping classes in unsafe code we
+  would own. Panel settings:
+  - style mask `nonactivatingPanel`: "the window is a panel … that does not
+    activate the owning app" (AppKit docs), so clicking does not activate
+    meetily or switch Space;
+  - `becomesKeyOnlyIfNeeded = YES`: buttons work without the panel becoming
+    key, so keyboard focus stays in Teams. No Esc shortcut (it would need key
+    focus, which requirement 2 forbids);
+  - collection behavior `canJoinAllSpaces` ("can appear in all spaces") +
+    `fullScreenAuxiliary` ("displays on the same space as the full screen
+    window") + `stationary` + `ignoresCycle`;
+  - level `statusBar` (above full-screen app windows, below system alerts);
+    `hidesOnDeactivate = NO`;
+  - shown with `orderFrontRegardless`, positioned top-right of the screen
+    containing the pointer; hidden with `orderOut`.
+- Page `frontend/src/app/meeting-prompt/page.tsx`: "Teams meeting detected",
+  **Record** and **Not now**, accessible names (`a11y-pass`). Buttons call
+  `meeting_prompt_respond(record: bool)`.
+- If the panel cannot be created at startup, log it and use a plain
+  notification ("Teams meeting detected, open meetily to record") instead.
 
-**The pop-up.** A second Tauri window, `meeting-prompt`, created once at
-startup and hidden, with a tiny page (`frontend/src/app/meeting-prompt/`):
-- Window: about 360×120 px, no decorations, transparent background,
-  `skip_taskbar`, created with `focused(false)`, placed top-right of the
-  display with the pointer.
-- **On top of full-screen apps (required).** A plain Tauri window with
-  `always_on_top` + `visible_on_all_workspaces` stays out of another app's
-  full-screen Space, and clicking it activates meetily, which makes macOS
-  jump to meetily's own Space. So the prompt is turned into a
-  non-activating `NSPanel` right after creation, in
-  `src/meeting_prompt_macos.rs` (~40 lines, `objc`, already a macOS
-  dependency, same technique as the `tauri-nspanel` crate):
-  - swap the window's class to an `NSPanel` subclass that returns `YES` from
-    `canBecomeKeyWindow` (so the buttons and Esc work) and `NO` from
-    `canBecomeMainWindow`;
-  - style mask `NSWindowStyleMaskNonactivatingPanel`, so clicking it does
-    not activate meetily or switch Space;
-  - collection behavior `canJoinAllSpaces | fullScreenAuxiliary |
-    stationary | ignoresCycle`, so it is present on every Space including
-    full-screen ones and stays out of Cmd-` cycling;
-  - window level `NSStatusWindowLevel` (above full-screen app windows, below
-    system alerts), `hidesOnDeactivate = NO`;
-  - show with `orderFrontRegardless`, never `makeKeyAndOrderFront`, so
-    focus stays in Teams until the user clicks the pop-up.
-  If the hand-rolled panel misbehaves, switch to the `tauri-nspanel` crate
-  (git dependency, justified in the commit) instead of patching around it.
-- Acceptance test on a real Mac, all must pass before step 3 is done:
-  Teams full-screen in its own Space (pop-up visible, click Record, still
-  in the Teams Space, Teams still has focus); Keynote/browser full-screen;
-  normal desktop; second display; pop-up while typing in Teams chat (no
-  keystrokes lost).
-- Content: "Teams meeting detected", the time, and two buttons: **Record**
-  (default) and **Not now**. Esc means Not now. Accessible names and
-  keyboard focus order per `a11y-pass`. A short sound is optional and off
-  by default.
-- It answers with a Tauri command `meeting_prompt_respond(record: bool)`
-  that feeds the state machine. Hide happens from Rust, so the pop-up also
-  closes when the meeting ends first.
-- Fallback only if the panel fails to build at startup (logged): a regular
-  system notification, "Teams meeting detected, open meetily to record".
-  No auto-record.
+### 3. Start and stop (frontend-owned, like upstream)
 
-**Start (after Record):** emit the same event the tray emits, with the
-meeting name `Teams meeting <local date time>` and a `record_only` flag.
-Reusing the frontend start flow keeps device selection, the `STARTING`
-state and error toasts identical to a manual start. The main window is not
-brought to the front.
+- Rust emits `teams-recording-requested { meeting_name }` to the main
+  window after Record, and `teams-meeting-ended` when the detector decides a
+  pop-up recording should stop.
+- `useRecordingStart` listens and runs its existing start function with the
+  given name and `recordOnly: true` (same device selection, `STARTING` state,
+  `checkModelReady` gate, error toasts). The model gate stays: batch
+  transcription needs the model later. It does **not** focus or reload the
+  main window (unlike the tray path).
+- `useRecordingStop` listens for `teams-meeting-ended` and runs the same stop
+  function as the Stop button.
+- Rust start command gets one new parameter `record_only: bool`. When true,
+  the transcription task is not started and the pipeline is told not to send
+  to the transcription channel (a flag next to `transcription_sender` in
+  `pipeline.rs`), so there is no per-segment warning. Audio is still saved;
+  `auto_save` is forced on for this recording.
+- The frontend remembers `recordOnly` for the current recording in its
+  recording state context, so `useRecordingStop` knows to skip the
+  "wait for live transcripts" step.
+- Any recording start notifies the detector (`recording_started_elsewhere`),
+  so an open pop-up closes and a late Record click is a no-op.
 
-**Stop:** when the detector sees Teams release the mic for 5 s, it calls the
-tray's stop path (`stop_recording_handler`), and shows a notification
-"Teams meeting ended, transcribing…". The frontend save creates the
-meeting row with its `folder_path` and no transcripts, and skips its "wait
-for live transcripts" step for record-only recordings. The after-meeting
-pipeline (section 4) takes over from there.
+### 4. After stop
 
-**Consent:** recording other people may require telling them, depending on
-jurisdiction. The setting text says so; the pop-up is an explicit choice
-for every meeting.
+**Pop-up recording (record-only)** in `useRecordingStop`:
+1. Save the meeting as today (zero transcripts) and mark the IndexedDB
+   recovery entry saved.
+2. `start_retranscription_command` with the user's selected transcription
+   model/provider/language, as `RetranscribeDialog` does. If another
+   retranscription is running, queue it in the frontend (a simple array; one
+   job at a time).
+3. On `retranscription-complete`: run the empty check (below). If kept,
+   export the note, then navigate to `/meeting-details?source=recording` so
+   the existing auto-summary runs when the user has it on.
+4. On `retranscription-error`: keep meeting and audio, toast "Transcription
+   failed, retry from the meeting page", export a note without transcript.
 
-### 4. Transcription after the meeting
+**Manual recording (live)**: after the existing save, run the empty check
+unless a `transcription-error` event was seen during this recording; then
+export the note; then navigate as today.
 
-**Record-only mode (new, small):** a `record_only` flag on the start path.
-When it is set:
-- skip `validate_transcription_model_ready` at start, because no model is
-  needed during the call;
-- don't call `start_transcription_task`. The pipeline still mixes and saves
-  audio; the transcription channel's receiver is dropped, so the pipeline
-  stops sending to it (check that a closed channel is handled quietly, not
-  logged every chunk);
-- force `auto_save` on for this recording, because the audio file is the
-  only input for transcription.
+**Empty check**: Rust command `discard_meeting_if_empty(meeting_id) ->
+bool`. It re-reads the transcripts from SQLite. Empty means no segments, or
+under 3 words in total (Whisper invents "Thank you." in silence):
+`shortcut: word-count emptiness, use VAD speech duration if real meetings get deleted`.
+If empty: read `folder_path`, delete via `MeetingsRepository::delete_meeting`,
+then remove the folder only if its canonical path is inside the configured
+recordings folder. Returns `true` when deleted; the caller then toasts
+"Recording had no speech, deleted" and goes home instead of to the meeting
+page. Unit-tested on: no rows, filler only, one real sentence, folder
+outside the recordings root (not removed).
 
-**After-meeting pipeline (Rust, `audio/after_meeting.rs`)**, run once the
-meeting row exists:
-0. If the saved audio is missing or has no frames (recording stopped before
-   any audio arrived), delete the meeting and its folder and stop.
-1. `start_retranscription(meeting_id, folder_path, language, model,
-   provider)` with the user's configured transcription model. It writes the
-   transcripts table itself and emits progress events the UI already shows.
-   **Empty check:** if transcription succeeded but produced no segments with
-   non-whitespace text, the recording is empty: delete the meeting row
-   (transcripts cascade) and its audio folder, notify "Teams meeting had no
-   speech, recording deleted", and stop. Whisper sometimes "hears" filler
-   in silence ("Thank you.", "you"), so the check also treats a transcript
-   under ~3 words in total as empty. Mark it with
-   `shortcut: word-count emptiness check, use VAD speech duration if real meetings get deleted`.
-   A transcription *failure* is never treated as empty: the audio is kept.
-
-**Empty manual recordings.** One shared Rust function,
-`discard_meeting_if_empty(meeting_id)` (in `audio/after_meeting.rs`,
-exposed as a Tauri command), applies the same rule to both paths:
-- Pop-up path: called by the pipeline right after batch transcription.
-- Manual path (live transcription): `useRecordingStop` calls the command
-  after `api_save_transcript` succeeds and the meeting is marked saved in
-  the IndexedDB recovery store, so the recovery prompt never offers the
-  deleted meeting back. It skips the call if a `transcription-error` event
-  was seen during this recording (then "no transcript" means failure, not
-  silence). If the meeting is deleted, it navigates home instead of to the
-  meeting page and shows the "no speech, deleted" toast.
-- The function re-reads the transcripts from SQLite instead of trusting the
-  caller, so both paths judge emptiness the same way.
-2. If auto-summary is on, run the summary through the service behind
-   `api_process_transcript` and wait for it to finish or fail.
-3. Export the Markdown note (section 5), with or without a summary.
-
-It runs in Rust, so it does not depend on the meeting page being open (the
-current auto-summary only fires when the UI navigates with
-`source=recording`). Only one batch job runs at a time (retranscription
-already has a guard). If a second meeting ends while one is processing,
-queue it, don't drop it. A plain `tokio` mpsc queue with one worker is
-enough.
-
-Failure handling: if transcription fails, keep the audio and the meeting,
-show a notification "Transcription failed, retry from the meeting page",
-and still export a note without a transcript, so the meeting is not lost
-from the vault. Manual retry uses the existing Retranscribe dialog.
+No-audio case: if the stop result reports no audio file, skip
+transcription and delete the same way.
 
 ### 5. Obsidian Markdown export
 
-A new Rust command `export_meeting_markdown(meeting_id) -> PathBuf`
-(`src/obsidian_export.rs`, registered in `lib.rs`):
+- Rust command `export_meeting_markdown(meeting_id) -> PathBuf` in
+  `src/obsidian_export.rs`. Pure helpers `render_markdown(..)` and
+  `safe_file_name(..)` with unit tests (frontmatter escaping, empty summary,
+  odd title characters `* " \ / < > : | ? # ^ [ ]`, length cap).
+- Called after save/transcription (section 4) and again from
+  `useSummaryGeneration` when a summary reaches `completed`, so the note
+  picks up the summary.
+- File `YYYY-MM-DD HHmm - <title>.md`; overwrite only if its frontmatter
+  `meetily_id` matches, else add ` (2)`. Temp file + rename.
+- Frontmatter: `title`, `date`, `start`, `end`, `duration_min`, `source`
+  (`teams` or `manual`), `meetily_id`, `tags: [meeting]`. Body: `# Title`,
+  `## Summary` (headings demoted), `## Transcript` with `**[hh:mm:ss]**`
+  lines.
+- Export folder: one setting with a folder picker (`tauri-plugin-dialog`).
+  Unset means no export. Audio never goes into the vault.
 
-- **Settings:** export folder (picked with `tauri-plugin-dialog`, stored
-  next to the recording preferences) and an "export automatically" switch.
-  The folder can be the vault root or a subfolder like `Meetings/`.
-- **When:** as the last step of the after-meeting pipeline, and again
-  whenever the summary or transcript is regenerated.
-- **File name:** `YYYY-MM-DD HHmm - <title>.md`. Strip the characters
-  Obsidian and Windows reject (`* " \ / < > : | ? # ^ [ ]`) and cap the
-  length.
-- **Updates:** if the file exists and its frontmatter `meetily_id` matches,
-  overwrite it. If it belongs to something else, add ` (2)`. Write to a temp
-  file, then rename, so Obsidian never sees half a note.
-- **Content:**
+### 6. Settings (two items)
 
-  ```markdown
-  ---
-  title: Weekly sync
-  date: 2026-10-10
-  start: 2026-10-10T14:00:12+02:00
-  end: 2026-10-10T14:47:40+02:00
-  duration_min: 47
-  source: teams
-  meetily_id: <meeting id>
-  tags: [meeting]
-  ---
+- "Ask to record Teams meetings" (off by default) with the consent note:
+  recording other people may require telling them.
+- "Obsidian export folder" (Choose…).
 
-  # Weekly sync
+Auto-summary stays the existing toggle (default off). Without it, notes have
+the transcript and no summary until the user generates one.
 
-  ## Summary
-  <summary markdown, headings demoted one level>
+## Implementation order (one feature per session)
 
-  ## Transcript
-  - **[00:00:12]** Hello everyone…
-  - **[00:00:20]** …
-  ```
+0. Spike (section 0). Throwaway; record findings in this file.
+1. Markdown export + export folder setting + empty check, wired into the
+   **manual** stop flow. Useful on its own; no detector needed.
+2. Record-only mode + after-stop flow for record-only recordings, testable
+   with a temporary dev trigger before the detector exists.
+3. Detector + pop-up + start/stop wiring + toggle. Real-Mac acceptance:
+   full-screen Teams in its own Space (pop-up visible; Record keeps you in
+   that Space; typing in Teams chat keeps working); another full-screen app;
+   normal desktop; second display; Not now; mic released while prompting;
+   manual start while prompting; meeting end → stop → transcript → note.
 
-- **Privacy:** the note only goes to the folder the user picked. Audio is
-  never copied into the vault. Nothing leaves the machine.
-- **Pure function for tests:** `render_markdown(meeting, summary,
-  transcripts) -> String` plus `safe_file_name(title, date) -> String`, both
-  unit-tested (frontmatter escaping, empty summary, odd characters in the
-  title).
+Later, not in this plan: Windows, other meeting apps, merging split
+meetings, pre-roll audio before the click.
 
-### 6. Settings UI
+## Risks
 
-One "Auto-capture" section in the existing Settings:
-- Ask to record Teams meetings (off by default) and its consent note.
-  Pop-up recordings always transcribe after the meeting and stop when
-  Teams lets go of the mic; manual ones stay live and stop by hand.
-- Start delay (1.5 s), end grace (5 s)
-- Obsidian export folder (Choose…, Open), Export automatically
-- Status line: "Watching for Teams" / "Not supported on this OS version"
+- **Teams behaviour assumptions** (mic held whole call, held while muted,
+  which process holds it). Settled by the spike; "Stop if" covers failure.
+- **Pop-up over full-screen** depends on AppKit panel behaviour; the real-Mac
+  acceptance list is the gate. `tauri-nspanel` must build against tauri
+  2.6.2; check before step 3.
+- **Frontend-owned flow** needs the webview alive. It is: closing the window
+  hides it (`lib.rs:601`). Quitting meetily mid-transcription leaves a saved
+  meeting with no transcript; the user can retranscribe from the meeting
+  page: `shortcut: no resume of interrupted batch transcription after quit`.
+- **Audio before Record is lost.** Usually only pre-join.
+- **Deleting the wrong thing**: only after a successful transcription, only
+  under 3 words, folder removal only inside the recordings root.
 
-## Implementation order (one feature per session, per AGENTS.md)
+## Review log (revision 2)
 
-1. **Markdown export, manual:** `export_meeting_markdown` plus an "Export to
-   Obsidian" button on the meeting page, and the folder setting. Useful on
-   its own and the easiest to verify.
-2. **Record-only mode + after-meeting pipeline:** testable with a manual
-   "Record only" start before any detection exists. Includes the
-   auto-export.
-3. **macOS Teams detector + pop-up:** the state machine with tests, the
-   CoreAudio input probe, the `meeting-prompt` window, auto-stop for
-   pop-up recordings, and the settings.
-
-Later, not planned here: Windows detector, other apps (Zoom/Webex via the
-match list), merging split meetings.
-
-Each step runs `/spec` → implement → checks → `/verify`, and ends with
-`IMPLEMENTATION_PLAN.md` updated.
-
-## Risks and open questions
-
-- **Short timings.** With a 1.5 s start the pop-up appears on the pre-join
-  screen, which is intended. With a 5 s stop, a short mic drop ends the
-  recording and the user gets asked again. Accepted; tunable in Settings.
-- **Audio before the click is lost.** Recording starts when the user clicks
-  Record, not when the meeting was detected. Usually that is before
-  joining, so nothing is missed. If it matters later, keep a few seconds of
-  pre-roll from detection; mark with a `shortcut:` comment.
-- **Pop-up over full-screen apps** relies on the NSPanel conversion
-  (private-ish AppKit usage through `objc`; the app already enables
-  `macos-private-api`). It can only be verified on a real Mac; the
-  acceptance test in section 3 is the gate.
-- **Does Teams hold the mic from pre-join straight into the meeting?** If it
-  briefly releases it on "Join now", the 5 s grace bridges that. Verify on a
-  real call in step 3.
-- **Deleting the wrong thing.** Auto-delete runs only after a successful
-  transcription (batch, or live with no transcription errors), and only when the transcript is
-  empty or nearly so. The existing `MeetingsRepository::delete_meeting`
-  removes only the DB rows, not audio. So the pipeline reads the meeting's
-  `folder_path` first, deletes the rows, then removes that folder only if it
-  sits inside the configured recordings folder (canonicalized path check).
-  No path guessing. Unit-test the emptiness rule
-  on fixtures (silence, Whisper filler, one real sentence).
-- **Two calls back to back** more than 5 s apart get two pop-ups and two
-  notes; closer than that, one. Acceptable.
-- **Frontend-owned save.** The meeting row is still created by the webview
-  (`useRecordingStop`). It works while the window is hidden, because the
-  webview keeps running, but it has to be tested with the window minimized
-  or closed to the tray. If that proves flaky, move the record-only save
-  into Rust.
-- **Pipeline coupling.** Dropping the transcription receiver must not make
-  the audio pipeline error out or stop recording. Cover it with a test in
-  step 2.
-- **Processing time.** Batch transcription of a 1 h meeting takes minutes,
-  depending on model and GPU (Metal on Apple Silicon). The note appears
-  after that, not at meeting end.
-- **macOS < 14.2:** no detection, stated in Settings.
-- **Upstream overlap:** none today. If upstream ships its own auto-detection,
-  prefer theirs and keep only the Obsidian export.
+- **Upstream code (independent verifier, 15 findings, all confirmed):** tray
+  start is a sessionStorage flag + reload, not an event; auto-summary is a
+  localStorage toggle, default off, unreadable from Rust;
+  `stop_recording_handler` is private and focuses the main window; the
+  record-only flag had no path to the frontend; the pipeline warns on every
+  send without a receiver; `process_transcript_background` reports no result
+  and needs provider/model/keys from the frontend; the frontend gates every
+  start on `checkModelReady`; the save has no length check and is skipped
+  when transcription never completes; no transition for a manual start while
+  prompting; Esc vs. no-focus contradiction; Windows design was scope creep;
+  Teams mic behaviour unverified. All addressed above.
+- **Official sources:** `cidre` rev `a9587fa` has `processes()`,
+  `bundle_id()`, `is_running_input()`. Apple AppKit docs confirm
+  `nonactivatingPanel` (panels only), `canJoinAllSpaces`,
+  `fullScreenAuxiliary`, `statusBar` level. Process objects: macOS 14 SDK,
+  not 14.2 as revision 1 said. Tauri 2.6.2 `WebviewWindowBuilder` has
+  `focused`, `always_on_top`, `visible_on_all_workspaces`, `skip_taskbar`,
+  `decorations`, `transparent`, `accept_first_mouse`, `ns_window`; it has no
+  `focusable`.
+- **Ponytail ultra cuts:** Rust after-meeting pipeline and summary
+  orchestration (reuse frontend flows instead); tunable timings and app list
+  (constants); status line; manual "Export to Obsidian" button (export is
+  automatic); Windows design; skipping the model check for record-only (the
+  model is needed afterwards anyway).
+- **Loopkit:** added "Never touch" and "Stop if" (`spec-first`), a spike
+  before building on unverified facts (`systematic-debugging`), and a fresh
+  verifier pass (`adversarial-verify`, `self-eval-bias`).
