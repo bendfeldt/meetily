@@ -13,7 +13,9 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 
 ## Next steps
 
-- None agreed yet. Run `/spec` before starting the next feature.
+- Proposed: Teams auto-capture with Obsidian Markdown export, see
+  `docs/plans/teams-auto-capture.md`. Not approved yet; open question:
+  which OS first. Step 1 (manual Markdown export) goes first.
 
 ## Evidence gaps
 
