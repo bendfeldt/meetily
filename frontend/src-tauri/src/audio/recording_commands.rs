@@ -1079,6 +1079,7 @@ pub async fn stop_recording<R: Runtime>(
         }),
     );
 
+    crate::empty_recordings::session_stopped(folder_path_str.as_deref()); // fork-only
     // Emit final stop event with folder_path and meeting_name for frontend to save
     app.emit(
         "recording-stopped",

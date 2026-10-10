@@ -232,22 +232,27 @@ Quitting during a job leaves a saved meeting without transcript; the
 meeting page's Retranscribe button recovers it:
 `shortcut: no automatic resume of interrupted batch jobs`.
 
-**Manual and live pop-up recordings** (`useRecordingStop`): `useRecordingStop`
-tracks `transcriptionErrorSeen` (a `transcription-error` listener inside the
-hook, reset on start). Right after `api_save_transcript` succeeds and
-**before** `markMeetingAsSaved`, `refetchMeetings`, `setCurrentMeeting`,
-the summary-language step and analytics: unless an error was seen, await
-`discard_meeting_if_empty(meeting_id)`. If `true`: mark the recovery entry
-saved, toast "Recording had no speech, deleted", navigate home, return.
+**Manual and live pop-up recordings** (implemented in step 3): after
+`api_save_transcript` succeeds, `useRecordingStop` calls
+`discard_meeting_if_empty(meeting_id)` before any follow-up step. If it
+returns `true`: mark the recovery entry saved, toast "Recording had no speech,
+deleted", navigate home, return. A failing check keeps the meeting.
 
-**Empty check**: Rust `discard_meeting_if_empty(meeting_id) -> bool` and
-`discard_meeting(meeting_id)`, registered as Tauri commands. Empty = no
-segments, or under 3 words total
-(`shortcut: word-count emptiness, use VAD speech duration if real meetings get deleted`).
-Delete rows via `MeetingsRepository::delete_meeting`, then `remove_dir_all`
-`folder_path` only if its canonical path is inside canonical
-`get_default_recordings_folder()`. Tests: no rows, filler only, one sentence,
-folder outside root, symlink escaping root.
+**Empty rule** (`empty_recordings.rs`): a recording is empty only if the voice
+detector reported no speech segment and never errored during it. Evidence is
+collected in Rust (reset in `RecordingManager::start_recording`, counted in
+`pipeline.rs` for every VAD segment and VAD error, snapshotted with the
+meeting folder in `stop_recording`) and must match the meeting's
+`folder_path`. It does not depend on transcription, so transcription
+failures, filtered output or lost UI events can never cause a deletion.
+Noise turned into Whisper filler counts as speech and is kept (safe
+direction). Deletion removes the DB rows, and the recording folder only if it
+resolves inside `get_default_recordings_folder()` and no other meeting uses
+it. Revision 5's word-count rule was dropped after two reviews found
+transcription paths that silently yield no words for real speech.
+
+For record-only recordings (step 4) the worker uses the batch result
+instead: `NO_SPEECH` / `NO_AUDIO_FILE` → `discard_meeting`.
 
 ### 5. Obsidian export (opt-in per meeting)
 

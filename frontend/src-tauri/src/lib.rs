@@ -41,6 +41,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod empty_recordings; // fork-only (bendfeldt/meetily)
 pub mod fork_settings; // fork-only (bendfeldt/meetily)
 pub mod notifications;
 pub mod obsidian_export; // fork-only (bendfeldt/meetily)
@@ -766,6 +767,7 @@ pub fn run() {
             summary::summary_engine::commands::builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
             obsidian_export::export_meeting_markdown,
+            empty_recordings::discard_meeting_if_empty,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
             audio::recording_preferences::get_default_recordings_folder_path,

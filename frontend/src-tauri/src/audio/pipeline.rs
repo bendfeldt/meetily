@@ -860,6 +860,7 @@ impl AudioPipeline {
                             match self.vad_processor.process_audio(&mixed_with_gain) {
                                 Ok(speech_segments) => {
                                     for segment in speech_segments {
+                                        crate::empty_recordings::speech_segment(); // fork-only
                                         let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
 
                                         if segment.samples.len() >= 800 {  // Minimum 50ms at 16kHz - matches Parakeet capability
@@ -886,6 +887,7 @@ impl AudioPipeline {
                                     }
                                 }
                                 Err(e) => {
+                                    crate::empty_recordings::vad_error(); // fork-only
                                     warn!("⚠️ VAD error: {}", e);
                                 }
                             }
@@ -929,6 +931,7 @@ impl AudioPipeline {
         match self.vad_processor.flush() {
             Ok(final_segments) => {
                 for segment in final_segments {
+                    crate::empty_recordings::speech_segment(); // fork-only
                     let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
 
                     // Send segments >= 50ms (800 samples at 16kHz) - matches main pipeline filter
@@ -956,6 +959,7 @@ impl AudioPipeline {
                 }
             }
             Err(e) => {
+                crate::empty_recordings::vad_error(); // fork-only
                 warn!("Failed to flush VAD processor: {}", e);
             }
         }
@@ -1038,8 +1042,14 @@ impl AudioPipelineManager {
         // Wait for pipeline to finish
         if let Some(handle) = self.pipeline_handle.take() {
             match handle.await {
-                Ok(result) => result,
+                Ok(result) => {
+                    if result.is_err() {
+                        crate::empty_recordings::vad_error(); // fork-only: VAD may not have finished
+                    }
+                    result
+                }
                 Err(e) => {
+                    crate::empty_recordings::vad_error(); // fork-only: VAD may not have finished
                     error!("Pipeline task failed: {}", e);
                     Ok(())
                 }

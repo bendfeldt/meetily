@@ -27,13 +27,21 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   another folder), sync hooks on summary generation/edit and title edit.
   Two independent reviews; accepted shortcuts are marked `shortcut:` in
   `obsidian_export.rs` (`/ponytail-debt` lists them).
-- Next: step 3, empty-recording check on the manual save path.
+- Step 3 done: empty manual recordings are deleted (`empty_recordings.rs`):
+  only when the VAD reported no speech and no VAD error for that recording;
+  folder removed only inside the recordings root and when not shared.
+  Hooks: `RecordingManager::start_recording`, `pipeline.rs` (VAD segments
+  and errors), `stop_recording`.
+- Next: step 4, record-only plumbing + after-meeting worker.
 
 ## Evidence gaps
 
 - Obsidian export not exercised in the running app (no desktop session):
   folder picker, button, toast, and sync after summary/title changes are
   covered only by unit tests of the pure parts.
+- Empty-recording deletion not exercised with real audio: silence vs. speech
+  detection relies on upstream's VAD, covered only by unit tests of the rule
+  and the delete path.
 - Edits made to an exported note in Obsidian are overwritten on the next
   sync (accepted). Changing the export folder leaves old notes unsynced.
 
