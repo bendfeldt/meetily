@@ -2,25 +2,31 @@
 
 Status: proposed, not started. Fork-only feature (`bendfeldt/meetily`).
 Decided: macOS first; transcription runs after the meeting, not live;
-start after ~1.5 s, stop after 5 s.
+detection after ~1.5 s asks before recording (pop-up), stop after 5 s.
 
 ## Goal
 
-When a Microsoft Teams meeting starts on macOS, meetily starts recording
-audio on its own, without live transcription. When the meeting ends, it
+When a Microsoft Teams meeting starts on macOS, meetily shows a pop-up in
+front of everything asking whether to record it. If the user says yes, it
+records audio without live transcription. When the meeting ends, it
 stops, transcribes the saved recording, generates the summary, and writes
 one Markdown note per meeting into a local folder the user picks (their
 Obsidian vault).
 
 ## Done when
 
-1. Joining a Teams call or meeting starts a meetily recording within ~2 s
-   (start delay 1.5 s, 0.5 s polling), with a notification "Recording Teams
-   meeting". No click needed. Nothing is transcribed during the call.
-2. Leaving the call stops the recording within ~5 s of Teams releasing the
-   microphone.
-3. An auto-recording shorter than the minimum length (default 60 s, e.g. a
-   pre-join preview you backed out of) is deleted, not transcribed.
+1. Within ~2 s of Teams taking the microphone (start delay 1.5 s, 0.5 s
+   polling), a small "Teams meeting detected — Record / Not now" pop-up
+   appears on top of all windows, including full-screen apps, on the
+   current Space. It does not steal keyboard focus from Teams.
+2. "Record" starts a record-only meeting recording at once. "Not now" (or
+   Esc) closes the pop-up, and it stays quiet until Teams releases the mic
+   and takes it again (the next meeting). If Teams releases the mic before
+   the user answers, the pop-up closes on its own.
+3. A recording started from the pop-up stops automatically within ~5 s of
+   Teams releasing the microphone, exactly like a detected meeting end.
+   Recordings started from the main window or tray are never auto-stopped.
+   The user can still stop a pop-up recording early by hand.
 4. After stop, the saved audio is transcribed in one batch, the meeting gets
    its full transcript and (if auto-summary is on) a summary. This works
    with the window hidden or closed to the tray.
@@ -87,46 +93,80 @@ makes Zoom or Webex a one-line config change later, with no new code.
 `audio/meeting_detector.rs`:
 
 ```
-Idle --(Teams holds mic ≥ start_delay, default 1.5 s)--> Recording
-Recording --(Teams released mic ≥ end_grace, default 5 s)--> Stopping --> Idle
+Idle --(Teams holds mic ≥ start_delay, 1.5 s)--> Prompting
+Prompting --Record--> Recording (detector-owned)
+Prompting --Not now / Esc--> Dismissed
+Prompting --(Teams released mic ≥ end_grace)--> Idle      (pop-up closes)
+Recording --(Teams released mic ≥ end_grace, 5 s)--> Stopping --> Idle
+Recording --(user stops by hand)--> Dismissed
+Dismissed --(Teams released mic ≥ end_grace)--> Idle
 ```
 
 - Polling is every 0.5 s. One CoreAudio process scan is cheap (a short
   list of objects), so this costs nothing noticeable.
-- A 1.5 s start delay barely filters anything: opening the pre-join screen
-  (Teams shows a mic level meter there) already starts a recording. That is
-  fine because Teams usually keeps the mic open from pre-join into the
-  meeting, so the recording simply includes the pre-join seconds. Backing
-  out without joining leaves a short recording, which the minimum-length
-  rule deletes (see section 4).
+- The pop-up usually appears on the pre-join screen (Teams turns the mic on
+  there for its level meter). That is the right moment to ask: the user
+  decides before joining, and nothing is recorded until they click Record.
+  There is no auto-delete of short recordings; every recording now has the
+  user's explicit yes.
+- "Dismissed" is keyed to the mic session, not a timer: no second pop-up
+  for the same meeting, even if the user stops a recording early.
 - A 5 s end grace period means a short mic drop (switching headset,
-  reconnect) can split one meeting into two recordings and two notes.
-  Accepted for now; mark it with
-  `shortcut: 5 s end grace splits a meeting on device switches, merge notes if it happens often`.
-- Both delays and the minimum length are settings with these defaults, so
-  they can be tuned without code changes.
-- Never auto-start if a recording is already running (a manual one, or the
-  user started early). Only auto-stop recordings the detector started, so a
-  manual recording is never cut off.
+  reconnect) ends the meeting and stops the recording, and the next mic
+  grab prompts again. Accepted for now; mark it with
+  `shortcut: 5 s end grace splits a meeting on device switches, raise end_grace if it happens often`.
+- Never prompt while any recording is running (manual or detector-owned).
+  Only a detector-owned recording is auto-stopped.
+- Start delay and end grace are settings with these defaults.
 - The detector is a pure state machine fed by `(now, teams_holds_mic)`
-  samples. That makes it unit-testable with no audio hardware: start delay,
-  end grace, flapping around the 5 s edge, and the manual-recording guard.
+  samples and user events (`record`, `dismiss`, `manual_stop`), returning
+  actions (`show_prompt`, `hide_prompt`, `start_recording`,
+  `stop_recording`). That makes it unit-testable with no audio hardware or
+  UI: start delay, end grace, flapping around the 5 s edge, dismiss for the
+  rest of the session, mic released while prompting, and the
+  manual-recording guard.
 
 ### 3. Start and stop through the existing paths
 
-- **Start:** emit the same event the tray emits, with the meeting name
-  `Teams meeting <local date time>` and a `record_only` flag, plus a system
-  notification ("Recording Teams meeting. Stop anytime from the tray.").
-  Reusing the frontend start flow keeps device selection, the `STARTING`
-  state and error toasts identical to a manual start.
-- **Stop:** call the tray's stop path (`stop_recording_handler`). The
-  frontend save creates the meeting row with its `folder_path` and no
-  transcripts, and skips its "wait for live transcripts" step for
-  record-only recordings. The after-meeting pipeline (section 4) takes over
-  from there.
-- **Consent:** recording other people may require telling them, depending on
-  jurisdiction. The setting text says so. The notification shows on every
-  auto-start, and off-by-default means the user opts in knowingly.
+**The pop-up.** A second Tauri window, `meeting-prompt`, created once at
+startup and hidden, with a tiny page (`frontend/src/app/meeting-prompt/`):
+- Window: about 360×120 px, no decorations, `always_on_top`,
+  `visible_on_all_workspaces`, `skip_taskbar`, placed top-right of the
+  screen with the pointer. Shown with `show()` but **not** `set_focus()`,
+  so typing in Teams is never interrupted. Clicking it works without focus.
+- To appear over full-screen apps, macOS needs a window level above normal
+  and the full-screen-auxiliary collection behavior. Tauri's
+  `always_on_top` plus `visible_on_all_workspaces` covers normal Spaces. If
+  it does not show over a full-screen Teams window, set the NSWindow
+  collection behavior through `objc`, which is already a macOS dependency.
+  Verify on a real full-screen call.
+- Content: "Teams meeting detected", the time, and two buttons: **Record**
+  (default) and **Not now**. Esc means Not now. Accessible names and
+  keyboard focus order per `a11y-pass`. A short sound is optional and off
+  by default.
+- It answers with a Tauri command `meeting_prompt_respond(record: bool)`
+  that feeds the state machine. Hide happens from Rust, so the pop-up also
+  closes when the meeting ends first.
+- Fallback when the window can't be shown (e.g. permissions or a broken
+  window): a regular system notification, "Teams meeting detected, open
+  meetily to record". No auto-record.
+
+**Start (after Record):** emit the same event the tray emits, with the
+meeting name `Teams meeting <local date time>` and a `record_only` flag.
+Reusing the frontend start flow keeps device selection, the `STARTING`
+state and error toasts identical to a manual start. The main window is not
+brought to the front.
+
+**Stop:** when the detector sees Teams release the mic for 5 s, it calls the
+tray's stop path (`stop_recording_handler`), and shows a notification
+"Teams meeting ended, transcribing…". The frontend save creates the
+meeting row with its `folder_path` and no transcripts, and skips its "wait
+for live transcripts" step for record-only recordings. The after-meeting
+pipeline (section 4) takes over from there.
+
+**Consent:** recording other people may require telling them, depending on
+jurisdiction. The setting text says so; the pop-up is an explicit choice
+for every meeting.
 
 ### 4. Transcription after the meeting
 
@@ -143,15 +183,12 @@ When it is set:
 
 **After-meeting pipeline (Rust, `audio/after_meeting.rs`)**, run once the
 meeting row exists:
-1. If the recording is shorter than the minimum length (default 60 s),
-   delete the meeting and its audio folder and stop. One line in the log,
-   no note.
-2. `start_retranscription(meeting_id, folder_path, language, model,
+1. `start_retranscription(meeting_id, folder_path, language, model,
    provider)` with the user's configured transcription model. It writes the
    transcripts table itself and emits progress events the UI already shows.
-3. If auto-summary is on, run the summary through the service behind
+2. If auto-summary is on, run the summary through the service behind
    `api_process_transcript` and wait for it to finish or fail.
-4. Export the Markdown note (section 5), with or without a summary.
+3. Export the Markdown note (section 5), with or without a summary.
 
 It runs in Rust, so it does not depend on the meeting page being open (the
 current auto-summary only fires when the UI navigates with
@@ -215,9 +252,10 @@ A new Rust command `export_meeting_markdown(meeting_id) -> PathBuf`
 ### 6. Settings UI
 
 One "Auto-capture" section in the existing Settings:
-- Auto-record Teams meetings (off by default) and its consent note.
-  Auto-recordings always transcribe after the meeting; manual ones stay live.
-- Start delay (1.5 s), end grace (5 s), minimum length (60 s)
+- Ask to record Teams meetings (off by default) and its consent note.
+  Pop-up recordings always transcribe after the meeting and stop when
+  Teams lets go of the mic; manual ones stay live and stop by hand.
+- Start delay (1.5 s), end grace (5 s)
 - Obsidian export folder (Choose…, Open), Export automatically
 - Status line: "Watching for Teams" / "Not supported on this OS version"
 
@@ -228,9 +266,10 @@ One "Auto-capture" section in the existing Settings:
    its own and the easiest to verify.
 2. **Record-only mode + after-meeting pipeline:** testable with a manual
    "Record only" start before any detection exists. Includes the
-   minimum-length delete and the auto-export.
-3. **macOS Teams detector:** the state machine with tests, the CoreAudio
-   input probe, wiring to start and stop, and the settings.
+   auto-export.
+3. **macOS Teams detector + pop-up:** the state machine with tests, the
+   CoreAudio input probe, the `meeting-prompt` window, auto-stop for
+   pop-up recordings, and the settings.
 
 Later, not planned here: Windows detector, other apps (Zoom/Webex via the
 match list), merging split meetings.
@@ -240,15 +279,21 @@ Each step runs `/spec` → implement → checks → `/verify`, and ends with
 
 ## Risks and open questions
 
-- **Short timings.** With a 1.5 s start and 5 s stop, the pre-join screen
-  starts recordings and short mic drops split meetings. The minimum-length
-  delete covers the first; the second is an accepted shortcut. Both are
-  tunable in Settings.
+- **Short timings.** With a 1.5 s start the pop-up appears on the pre-join
+  screen, which is intended. With a 5 s stop, a short mic drop ends the
+  recording and the user gets asked again. Accepted; tunable in Settings.
+- **Audio before the click is lost.** Recording starts when the user clicks
+  Record, not when the meeting was detected. Usually that is before
+  joining, so nothing is missed. If it matters later, keep a few seconds of
+  pre-roll from detection; mark with a `shortcut:` comment.
+- **Pop-up over full-screen Teams** depends on macOS window level and
+  collection behavior. Verify on a real call; the `objc` fallback is
+  described in section 3.
 - **Does Teams hold the mic from pre-join straight into the meeting?** If it
   briefly releases it on "Join now", the 5 s grace bridges that. Verify on a
   real call in step 3.
-- **Two calls back to back** more than 5 s apart become two notes; closer
-  than that, one. Acceptable.
+- **Two calls back to back** more than 5 s apart get two pop-ups and two
+  notes; closer than that, one. Acceptable.
 - **Frontend-owned save.** The meeting row is still created by the webview
   (`useRecordingStop`). It works while the window is hidden, because the
   webview keeps running, but it has to be tested with the window minimized
