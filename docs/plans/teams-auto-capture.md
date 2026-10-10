@@ -30,10 +30,11 @@ Obsidian vault).
    Teams releasing the microphone, exactly like a detected meeting end.
    Recordings started from the main window or tray are never auto-stopped.
    The user can still stop a pop-up recording early by hand.
-4. An empty pop-up recording is deleted: no audio frames, or no speech
-   after transcription. The meeting row and its audio folder are removed,
-   no summary or note is made, and a notification says "Teams meeting had
-   no speech, recording deleted".
+4. An empty recording is deleted, whether it came from the pop-up or was
+   started by hand: no audio frames, or no speech after transcription. The
+   meeting rows and its audio folder are removed, no summary or note is
+   made, and a notification says "Recording had no speech, deleted". A
+   recording whose transcription *failed* is never deleted.
 5. After stop, the saved audio is transcribed in one batch, the meeting gets
    its full transcript and (if auto-summary is on) a summary. This works
    with the window hidden or closed to the tray.
@@ -222,8 +223,20 @@ meeting row exists:
    under ~3 words in total as empty. Mark it with
    `shortcut: word-count emptiness check, use VAD speech duration if real meetings get deleted`.
    A transcription *failure* is never treated as empty: the audio is kept.
-   Only pop-up recordings are auto-deleted; manual recordings are never
-   deleted automatically.
+
+**Empty manual recordings.** One shared Rust function,
+`discard_meeting_if_empty(meeting_id)` (in `audio/after_meeting.rs`,
+exposed as a Tauri command), applies the same rule to both paths:
+- Pop-up path: called by the pipeline right after batch transcription.
+- Manual path (live transcription): `useRecordingStop` calls the command
+  after `api_save_transcript` succeeds and the meeting is marked saved in
+  the IndexedDB recovery store, so the recovery prompt never offers the
+  deleted meeting back. It skips the call if a `transcription-error` event
+  was seen during this recording (then "no transcript" means failure, not
+  silence). If the meeting is deleted, it navigates home instead of to the
+  meeting page and shows the "no speech, deleted" toast.
+- The function re-reads the transcripts from SQLite instead of trusting the
+  caller, so both paths judge emptiness the same way.
 2. If auto-summary is on, run the summary through the service behind
    `api_process_transcript` and wait for it to finish or fail.
 3. Export the Markdown note (section 5), with or without a summary.
@@ -331,8 +344,8 @@ Each step runs `/spec` → implement → checks → `/verify`, and ends with
 - **Does Teams hold the mic from pre-join straight into the meeting?** If it
   briefly releases it on "Join now", the 5 s grace bridges that. Verify on a
   real call in step 3.
-- **Deleting the wrong thing.** Auto-delete only runs on pop-up recordings,
-  only after a successful transcription, and only when the transcript is
+- **Deleting the wrong thing.** Auto-delete runs only after a successful
+  transcription (batch, or live with no transcription errors), and only when the transcript is
   empty or nearly so. The existing `MeetingsRepository::delete_meeting`
   removes only the DB rows, not audio. So the pipeline reads the meeting's
   `folder_path` first, deletes the rows, then removes that folder only if it
