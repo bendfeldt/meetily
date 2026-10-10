@@ -27,13 +27,15 @@ Skills are files at `.claude/skills/<name>/SKILL.md`. Each has YAML frontmatter 
 
 | Task shape                                           | First skill                                                                          |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Writing or changing any code                         | `ponytail` (full mode) alongside the task's own skills                              |
 | "Fix this bug" / test failing / crash                | `systematic-debugging`, then `read-the-trace`                                        |
 | "It broke between two commits"                       | `bisect-regression`                                                                  |
 | "Flaky test"                                         | `flaky-hunter`                                                                       |
 | "Add a feature" / write anything new                 | `spec-first`, then `write-failing-test-first`                                        |
 | "Refactor" / dead code / deep nesting                | `kill-dead-code`, `simplify`, `reduce-nesting`                                       |
 | About to claim done / commit / open PR               | `adversarial-verify` + `verification-before-completion` + `self-eval-bias`           |
-| Review a diff                                        | `adversarial-verify`, `pr-from-diff`                                                 |
+| Review a diff                                        | `adversarial-verify`, `ponytail-review`, `pr-from-diff`                              |
+| Audit the whole repo / find bloat / list shortcuts   | `ponytail-audit`, `ponytail-debt`                                                    |
 | Frontend / UI work                                   | `design-system`, `a11y-pass`, `loading-empty-error-states`                           |
 | Security touch                                       | `owasp-review`, `authz-check`, `input-validation`, `secret-scan`, `dependency-audit` |
 | Data / SQL / migrations                              | `sql-review`, `migration-writer`, `schema-diff`                                      |

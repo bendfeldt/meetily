@@ -90,6 +90,17 @@ Ask and re-plan if evidence requires a different feature or behavior change.
   publish releases or change shared state without approval.
 - Stop any `tauri dev` / Next.js dev server started by the session.
 
+## Coding mode: Ponytail
+
+Write code in [Ponytail](.claude/skills/ponytail/SKILL.md) full mode by
+default: the smallest complete change, reuse before writing, no speculative
+abstractions or dependencies, one small test where logic needs one, and a
+closing line naming what was skipped and any risk. Upstream meetily already
+uses its marker convention: a deliberate shortcut gets a comment
+`shortcut: <the limit>, <when to upgrade>` (older code says `ponytail:`).
+`/ponytail-debt` lists those markers. Ponytail never overrides the checks,
+the verification step or the "Never" list here.
+
 ## Installed skills and commands
 
 Skills are installed at `.claude/skills/<name>/SKILL.md`. Read matching skills
@@ -109,6 +120,10 @@ Installed Claude commands:
 - `/verify`: read-only adversarial diff review with a JSON verdict.
 - `/polish`: scoped quality pass over the current diff.
 - `/next`: optional ledger-based suggestions; requires a feature ledger first.
+- `/ponytail [lite|full|ultra]`, `/ponytail-review` (diff review),
+  `/ponytail-audit` (whole-repo review), `/ponytail-debt` (shortcut ledger),
+  `/ponytail-help`, `/ponytail-gain`: vendored Ponytail skills; all but
+  `/ponytail` are read-only reports.
 
 There is no installed `/loop` command. Command Markdown is client guidance,
 not an executable exit-code validator.

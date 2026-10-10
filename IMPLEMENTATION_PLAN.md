@@ -7,7 +7,8 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 
 - `main` mirrors upstream `Zackriya-Solutions/meetily` at v0.4.1.
 - Agentic workflow installed: loopkit skills, `/spec` `/verify` `/polish`
-  `/next`, verifier subagent, SessionStart/PreCompact hooks.
+  `/next`, verifier subagent, SessionStart/PreCompact hooks, plus the
+  vendored Ponytail skills (default coding mode, see AGENTS.md).
 - No fork-specific runtime changes.
 
 ## Next steps
