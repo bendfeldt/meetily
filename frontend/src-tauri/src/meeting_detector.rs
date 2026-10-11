@@ -43,6 +43,7 @@ pub struct Detector {
     held_since: Option<Instant>,
     released_since: Option<Instant>,
     recording_since: Option<Instant>,
+    stop_failures: u32,
 }
 
 impl Default for Detector {
@@ -52,6 +53,7 @@ impl Default for Detector {
             held_since: None,
             released_since: None,
             recording_since: None,
+            stop_failures: 0,
         }
     }
 }
@@ -160,17 +162,33 @@ impl Detector {
         }
         self.state = State::Recording;
         self.recording_since = Some(now);
+        self.stop_failures = 0;
         vec![]
     }
 
-    pub fn stop_finished(&mut self) {
-        if self.state == State::Stopping {
-            self.state = if self.held_since.is_some() {
-                State::Dismissed
-            } else {
-                State::Idle
-            };
+    /// A failed stop keeps managing the recording and retries after another
+    /// end grace (or another MAX_RECORDING), instead of dropping it.
+    pub fn stop_finished(&mut self, ok: bool, now: Instant) {
+        if self.state != State::Stopping {
+            return;
         }
+        if !ok {
+            self.stop_failures += 1;
+            self.state = State::Recording;
+            self.released_since = None;
+            self.recording_since = Some(now);
+            return;
+        }
+        self.state = if self.held_since.is_some() {
+            State::Dismissed
+        } else {
+            State::Idle
+        };
+    }
+
+    /// Consecutive failed stops of the current pop-up recording.
+    pub fn stop_failures(&self) -> u32 {
+        self.stop_failures
     }
 
     /// The feature was switched off. A running pop-up recording continues as
@@ -208,6 +226,7 @@ mod probe {
                 // CoreAudio process objects need macOS 14+.
                 if !WARNED.swap(true, Ordering::Relaxed) {
                     log::warn!("meeting_detector: cannot list audio processes ({e:?}); Teams detection is unavailable");
+                    super::set_unavailable("Teams detection needs macOS 14 or later.");
                 }
                 Vec::new()
             }
@@ -221,6 +240,22 @@ pub use runner::start;
 /// Clicks from the pop-up: Record (true) or Not now (false).
 static UI: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<bool>> =
     std::sync::OnceLock::new();
+
+/// Why the Teams pop-up cannot work on this Mac, shown in Settings.
+static UNAVAILABLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn set_unavailable(reason: &str) {
+    if let Ok(mut slot) = UNAVAILABLE.lock() {
+        slot.get_or_insert_with(|| reason.to_string());
+    }
+}
+
+/// `None` while the Teams pop-up works (or has not been tried yet).
+#[tauri::command]
+pub fn teams_prompt_unavailable() -> Option<String> {
+    UNAVAILABLE.lock().ok().and_then(|slot| slot.clone())
+}
 
 /// The pop-up's buttons. A no-op where the detector does not run.
 #[tauri::command]
@@ -238,16 +273,21 @@ mod runner {
     use tokio::sync::mpsc::unbounded_channel;
 
     fn notify<R: Runtime>(app: &AppHandle<R>, body: &str) {
-        let _ = app
+        if let Err(e) = app
             .notification()
             .builder()
             .title("meetily")
             .body(body)
-            .show();
+            .show()
+        {
+            log::error!("meeting_detector: cannot show notification \"{body}\": {e}");
+        }
     }
 
     async fn stop<R: Runtime>(app: &AppHandle<R>) -> bool {
         // Same as the tray's stop, without focusing the main window.
+        // stop_recording ignores save_path (the folder comes from the
+        // recording session); it is only filled to satisfy RecordingArgs.
         let save_path = std::env::temp_dir().join("meetily-popup-stop.wav");
         let result = crate::audio::recording_commands::stop_recording(
             app.clone(),
@@ -258,15 +298,16 @@ mod runner {
         .await;
         match result {
             Ok(()) => {
-                let _ = app.emit("recording-stop-complete", true);
+                // Emitted for record-only stops too, like the tray: the
+                // frontend save path checks last_recording_was_record_only
+                // and leaves those to after_meeting.rs.
+                if let Err(e) = app.emit("recording-stop-complete", true) {
+                    log::error!("meeting_detector: cannot emit recording-stop-complete: {e}");
+                }
                 true
             }
             Err(e) => {
                 log::error!("meeting_detector: stopping the recording failed: {e}");
-                notify(
-                    app,
-                    "Could not stop the Teams recording automatically. Stop it from the tray.",
-                );
                 false
             }
         }
@@ -299,8 +340,14 @@ mod runner {
                         next.extend(detector.start_finished(ok, Instant::now()));
                     }
                     Action::Stop => {
-                        stop(&app).await;
-                        detector.stop_finished();
+                        let ok = stop(&app).await;
+                        detector.stop_finished(ok, Instant::now());
+                        if detector.stop_failures() == 1 {
+                            notify(
+                                &app,
+                                "Could not stop the Teams recording automatically. meetily will retry; you can also stop it from the tray.",
+                            );
+                        }
                     }
                 }
             }
@@ -319,11 +366,23 @@ mod runner {
             let mut detector = Detector::default();
             let mut interval = tokio::time::interval(POLL);
             let mut was_enabled = false;
+            let mut panel_ready = false;
             let mut last_holders: Vec<String> = Vec::new();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let enabled = crate::fork_settings::load(&app).teams_prompt_enabled;
+                        let mut enabled = crate::fork_settings::load(&app).teams_prompt_enabled;
+                        if enabled && !panel_ready && teams_prompt_unavailable().is_none() {
+                            match crate::meeting_prompt::ensure(&app).await {
+                                Ok(()) => panel_ready = true,
+                                Err(e) => {
+                                    log::error!("meeting_detector: Teams pop-up unavailable: {e}");
+                                    set_unavailable(&format!("The pop-up could not be created: {e}"));
+                                }
+                            }
+                        }
+                        // No silent substitute without the pop-up.
+                        enabled &= panel_ready;
                         if !enabled {
                             if was_enabled {
                                 let actions = detector.feature_off();
@@ -447,7 +506,22 @@ mod tests {
         assert_eq!(polls(&mut d, &mut now, 1, false, true), vec![Action::Stop]);
         assert_eq!(d.state(), State::Stopping);
         assert!(polls(&mut d, &mut now, 4, true, true).is_empty()); // re-grab while stopping: no prompt
-        d.stop_finished();
+        d.stop_finished(true, now);
+        assert_eq!(d.state(), State::Dismissed);
+    }
+
+    #[test]
+    fn failed_stop_keeps_managing_and_retries() {
+        let (mut d, mut now) = recording();
+        assert_eq!(polls(&mut d, &mut now, 11, false, true), vec![Action::Stop]);
+        d.stop_finished(false, now);
+        assert_eq!((d.state(), d.stop_failures()), (State::Recording, 1));
+        assert!(polls(&mut d, &mut now, 10, false, true).is_empty()); // a fresh end grace
+        assert_eq!(polls(&mut d, &mut now, 1, false, true), vec![Action::Stop]);
+        d.stop_finished(false, now);
+        assert_eq!(d.stop_failures(), 2);
+        // The user stops it from the tray: hands off.
+        assert!(polls(&mut d, &mut now, 1, false, false).is_empty());
         assert_eq!(d.state(), State::Dismissed);
     }
 
@@ -471,7 +545,7 @@ mod tests {
         polls(&mut d, &mut now, 11, false, false); // Teams left while starting
         assert_eq!(d.start_finished(true, now), vec![Action::Stop]);
         assert_eq!(d.state(), State::Stopping);
-        d.stop_finished();
+        d.stop_finished(true, now);
         assert_eq!(d.state(), State::Idle);
     }
 

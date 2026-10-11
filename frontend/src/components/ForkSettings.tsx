@@ -18,11 +18,15 @@ interface ForkSettingsData {
 export function ForkSettings() {
   const platform = usePlatform();
   const [settings, setSettings] = useState<ForkSettingsData | null>(null);
+  const [teamsUnavailable, setTeamsUnavailable] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<ForkSettingsData>('get_fork_settings')
       .then(setSettings)
       .catch((error) => toast.error('Could not load settings', { description: String(error) }));
+    invoke<string | null>('teams_prompt_unavailable')
+      .then(setTeamsUnavailable)
+      .catch(() => setTeamsUnavailable(null));
   }, []);
 
   if (!settings) return null;
@@ -31,7 +35,7 @@ export function ForkSettings() {
     const next = { ...settings, teams_prompt_enabled: enabled };
     try {
       await invoke('set_fork_settings', { settings: next });
-      setSettings(next);
+      setSettings((current) => current && { ...current, teams_prompt_enabled: enabled });
     } catch (error) {
       toast.error('Could not save setting', { description: String(error) });
     }
@@ -40,7 +44,7 @@ export function ForkSettings() {
   const chooseFolder = async () => {
     try {
       const folder = await invoke<string | null>('choose_obsidian_export_folder');
-      if (folder) setSettings({ ...settings, obsidian_export_folder: folder });
+      if (folder) setSettings((current) => current && { ...current, obsidian_export_folder: folder });
     } catch (error) {
       toast.error('Could not save folder', { description: String(error) });
     }
@@ -57,6 +61,11 @@ export function ForkSettings() {
               Recordings started from it stop when Teams releases the microphone. Recording other
               people may require telling them.
             </div>
+            {teamsUnavailable && (
+              <div className="text-sm text-amber-700 mt-1" role="status">
+                Unavailable: {teamsUnavailable}
+              </div>
+            )}
           </div>
           <Switch
             aria-labelledby="teams-prompt-label"

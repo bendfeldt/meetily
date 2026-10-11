@@ -425,10 +425,8 @@ pub async fn export_meeting_markdown<R: Runtime>(
     meeting_id: String,
     choose_folder: bool,
 ) -> Result<Option<String>, String> {
-    let mut settings = fork_settings::load(&app);
-    let dir = match settings
+    let dir = match fork_settings::load(&app)
         .obsidian_export_folder
-        .clone()
         .filter(|_| !choose_folder)
     {
         Some(dir) => dir,
@@ -436,6 +434,8 @@ pub async fn export_meeting_markdown<R: Runtime>(
             let Some(dir) = pick_folder(&app).await else {
                 return Ok(None);
             };
+            // Reload: other settings may have changed while the picker was open.
+            let mut settings = fork_settings::load(&app);
             settings.obsidian_export_folder = Some(dir.clone());
             fork_settings::save(&app, &settings).map_err(|e| e.to_string())?;
             dir

@@ -518,15 +518,12 @@ pub fn run() {
                 log::error!("Failed to create system tray: {}", e);
             }
 
-            // Fork-only (bendfeldt/meetily): Teams meeting pop-up. Without the
-            // panel the detector does not run (no silent substitute).
+            // Fork-only (bendfeldt/meetily): Teams meeting detection. The
+            // pop-up panel is created only once the setting is switched on.
             #[cfg(target_os = "macos")]
             {
                 let handle = _app.handle();
-                let ready = handle
-                    .plugin(tauri_nspanel::init())
-                    .and_then(|_| meeting_prompt::create(handle));
-                match ready {
+                match handle.plugin(tauri_nspanel::init()) {
                     Ok(()) => meeting_detector::start(handle.clone()),
                     Err(e) => log::error!("Teams meeting pop-up unavailable: {}", e),
                 }
@@ -792,6 +789,7 @@ pub fn run() {
             fork_settings::get_fork_settings,
             fork_settings::set_fork_settings,
             meeting_detector::meeting_prompt_respond,
+            meeting_detector::teams_prompt_unavailable,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
             audio::recording_preferences::get_default_recordings_folder_path,

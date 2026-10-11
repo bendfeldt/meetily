@@ -19,8 +19,14 @@ const NON_ACTIVATING_PANEL: i32 = 1 << 7;
 /// NSStatusWindowLevel: above full-screen app windows, below system alerts.
 const STATUS_WINDOW_LEVEL: i32 = 25;
 
-/// Create the hidden pop-up panel. Called once at startup.
-pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+/// Create the hidden pop-up panel unless it exists. Called from the detector
+/// loop the first time the feature is on, so users who never enable it get
+/// no extra window. Builds the window off the main thread (like a command
+/// would) and converts it to a panel on the main thread.
+pub async fn ensure<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if app.get_webview_window(LABEL).is_some() {
+        return Ok(());
+    }
     let window =
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("meeting-prompt.html".into()))
             .title("Teams meeting detected")
@@ -33,8 +39,20 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             .visible(false)
             .focused(false)
             .accept_first_mouse(true)
-            .build()?;
+            .build()
+            .map_err(|e| format!("cannot create the pop-up window: {e}"))?;
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(make_panel(&window));
+    })
+    .map_err(|e| format!("cannot reach the main thread: {e}"))?;
+    rx.await
+        .map_err(|_| "the main thread dropped the pop-up setup".to_string())?
+        .map_err(|e| format!("cannot turn the pop-up into a panel: {e}"))
+}
+
+fn make_panel<R: Runtime>(window: &tauri::WebviewWindow<R>) -> tauri::Result<()> {
     let panel = window.to_panel()?;
     panel.set_style_mask(NON_ACTIVATING_PANEL);
     panel.set_floating_panel(true);
@@ -66,7 +84,9 @@ fn place<R: Runtime>(app: &AppHandle<R>) {
         let size = monitor.size();
         let x = pos.x as f64 + size.width as f64 - (WIDTH + MARGIN) * scale;
         let y = pos.y as f64 + (MARGIN + 24.0) * scale; // below the menu bar
-        let _ = window.set_position(PhysicalPosition::new(x, y));
+        if let Err(e) = window.set_position(PhysicalPosition::new(x, y)) {
+            log::warn!("meeting_prompt: cannot place the pop-up: {e}");
+        }
     }
 }
 

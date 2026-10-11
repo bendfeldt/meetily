@@ -12,6 +12,15 @@ use tauri_plugin_store::StoreExt;
 const STORE_FILE: &str = "fork_settings.json";
 const STORE_KEY: &str = "settings";
 
+/// load() runs every detector poll; warn about a broken store once.
+static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn warn_once(message: String) {
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!("{message}");
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ForkSettings {
     /// Folder (usually inside an Obsidian vault) that meeting notes go to.
@@ -24,13 +33,15 @@ pub struct ForkSettings {
 
 pub fn load<R: Runtime>(app: &AppHandle<R>) -> ForkSettings {
     let Ok(store) = app.store(STORE_FILE) else {
-        log::warn!("fork_settings: store unavailable, using defaults");
+        warn_once("fork_settings: store unavailable, using defaults".to_string());
         return ForkSettings::default();
     };
     match store.get(STORE_KEY).map(serde_json::from_value) {
         Some(Ok(settings)) => settings,
         Some(Err(e)) => {
-            log::warn!("fork_settings: unreadable {STORE_FILE}, using defaults: {e}");
+            warn_once(format!(
+                "fork_settings: unreadable {STORE_FILE}, using defaults: {e}"
+            ));
             ForkSettings::default()
         }
         None => ForkSettings::default(),

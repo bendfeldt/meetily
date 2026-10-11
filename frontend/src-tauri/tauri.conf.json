@@ -40,8 +40,7 @@
                     "identifier": "main",
                     "description": "Main window capability with file system and media access",
                     "windows": [
-                        "main",
-                        "meeting-prompt"
+                        "main"
                     ],
                     "permissions": [
                         "fs:default",
@@ -74,6 +73,16 @@
                                 }
                             ]
                         }
+                    ]
+                },
+                {
+                    "identifier": "meeting-prompt",
+                    "description": "Fork-only: Teams meeting pop-up, calls only the app command meeting_prompt_respond",
+                    "windows": [
+                        "meeting-prompt"
+                    ],
+                    "permissions": [
+                        "core:default"
                     ]
                 }
             ]

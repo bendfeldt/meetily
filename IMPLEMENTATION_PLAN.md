@@ -52,7 +52,23 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   to 18ffb9a), Settings section (`ForkSettings.tsx`: toggle, off by
   default; export folder). Auto-stop 5 s after Teams releases the mic, or
   after 4 h at most (Teams has been reported to keep the mic open after a
-  call).
+  call). As built, differing from docs/plans/teams-auto-capture.md:
+  - The pop-up is a static `public/meeting-prompt.html` + `.js`, not a Next
+    page, so the app layout and providers do not load into it.
+  - The panel is created the first time the setting is on, so toggle-off
+    users get no extra window. It has its own `meeting-prompt` capability
+    (`core:default` only), not the main window's.
+  - "Not now" lasts until Teams has released the mic for 5 s (the end
+    grace), so a brief mic flap does not re-prompt.
+  - The stop emits `recording-stop-complete` like the tray; record-only
+    stops are skipped by the frontend's `last_recording_was_record_only`
+    check.
+  - A failed auto-stop keeps managing the recording and retries after
+    another end grace (or another 4 h); notifies once.
+  - Settings shows "Unavailable: …" when CoreAudio process listing fails
+    (macOS < 14) or the panel cannot be created.
+  - The detector loop reads `fork_settings.json` every 0.5 s even when off
+    (an in-memory store read; a broken store warns once).
 
 ## Evidence gaps
 
