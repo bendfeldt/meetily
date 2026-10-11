@@ -30,3 +30,12 @@ export function isOllamaNotInstalledError(errorMessage: string): boolean {
 
   return patterns.some(pattern => lowerError.includes(pattern));
 }
+
+/**
+ * Readable text for a caught error. Tauri commands reject with a plain string,
+ * not an Error, so `err instanceof Error` alone loses the cause.
+ */
+export function errorText(err: unknown): string {
+  const text = err instanceof Error ? err.message : err == null ? '' : String(err);
+  return text || 'Unknown error';
+}

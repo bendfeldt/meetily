@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Analytics from '@/lib/analytics';
+import { errorText } from '@/lib/utils';
 import { invoke } from '@tauri-apps/api/core';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { SummaryProcessResponse } from '@/types';
@@ -266,7 +267,7 @@ export function SidebarProvider({ children }: { children: React.ReactNode }) {
             start: processId,
             end: null,
             data: null,
-            error: error instanceof Error ? error.message : 'Unknown error',
+            error: errorText(error),
           });
         } catch (callbackError) {
           console.error('Failed to handle summary polling error:', callbackError);

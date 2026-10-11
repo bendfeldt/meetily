@@ -14,6 +14,7 @@ import {
   WhisperAPI
 } from '../lib/whisper';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { errorText } from '@/lib/utils';
 
 interface ModelManagerProps {
   selectedModel?: string;
@@ -175,7 +176,7 @@ export function ModelManager({
         console.error('Failed to initialize Whisper:', err);
         setError(err instanceof Error ? err.message : 'Failed to load models');
         toast.error('Failed to load transcription models', {
-          description: err instanceof Error ? err.message : 'Unknown error',
+          description: errorText(err),
           duration: 5000
         });
       } finally {
@@ -350,7 +351,7 @@ export function ModelManager({
     } catch (err) {
       console.error('Failed to cancel download:', err);
       toast.error('Failed to cancel download', {
-        description: err instanceof Error ? err.message : 'Unknown error',
+        description: errorText(err),
         duration: 4000
       });
     }

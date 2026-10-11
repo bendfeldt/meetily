@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
+import { errorText } from '@/lib/utils';
 import {
   ModelStatus,
   ParakeetAPI,
@@ -73,7 +74,7 @@ export function ParakeetModelManager({
         console.error('Failed to initialize Parakeet:', err);
         setError(err instanceof Error ? err.message : 'Failed to load models');
         toast.error('Failed to load transcription models', {
-          description: err instanceof Error ? err.message : 'Unknown error',
+          description: errorText(err),
           duration: 5000
         });
       } finally {
@@ -284,7 +285,7 @@ export function ParakeetModelManager({
       clearCancellingModel(modelName);
       console.error('Failed to cancel download:', err);
       toast.error('Failed to cancel download', {
-        description: err instanceof Error ? err.message : 'Unknown error',
+        description: errorText(err),
         duration: 4000
       });
     }

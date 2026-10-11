@@ -9,6 +9,8 @@ import { listen } from '@tauri-apps/api/event';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
+import { errorText } from '@/lib/utils';
+import { toast } from 'sonner';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
 import type { TranscriptionErrorPayload } from '@/services/transcriptService';
 
@@ -178,6 +180,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           return;
         }
       }
+      toast.error('Failed to stop recording', { description: errorText(error) });
       setIsProcessing(false);
       onRecordingStop(false);
     } finally {

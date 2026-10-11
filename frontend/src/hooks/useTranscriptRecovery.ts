@@ -11,6 +11,7 @@ import { indexedDBService, MeetingMetadata, StoredTranscript } from '@/services/
 import { storageService } from '@/services/storageService';
 import { applyPinnedSummaryLanguageToMeeting } from '@/lib/summary-language-preferences';
 import { toast } from 'sonner';
+import { errorText } from '@/lib/utils';
 
 interface AudioRecoveryStatus {
   status: string; // "success" | "partial" | "failed" | "none"
@@ -149,7 +150,7 @@ export function useTranscriptRecovery(): UseTranscriptRecoveryReturn {
             status: 'failed',
             chunk_count: 0,
             estimated_duration_seconds: 0,
-            message: error instanceof Error ? error.message : 'Unknown error'
+            message: errorText(error)
           };
         }
       } else {
