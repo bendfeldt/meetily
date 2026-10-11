@@ -23,8 +23,8 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   code (run 38088365544).
 - Step 2 done: opt-in Obsidian export. `fork_settings.rs` (own store file),
   `obsidian_export.rs` (render, file naming, find-by-id, rename, sync), an
-  "Obsidian" button in the meeting transcript toolbar (Option-click picks
-  another folder), sync hooks on summary generation/edit and title edit.
+  "Obsidian" button in the meeting transcript toolbar (folder chosen on
+  first export, changed in Settings), sync hooks on summary generation/edit and title edit.
   Two independent reviews; accepted shortcuts are marked `shortcut:` in
   `obsidian_export.rs` (`/ponytail-debt` lists them).
 - Step 3 done: empty manual recordings are deleted (`empty_recordings.rs`):

@@ -207,7 +207,7 @@ fn classify(result: &anyhow::Result<()>) -> Outcome {
             if msg.starts_with(ALREADY_IN_PROGRESS) {
                 Outcome::Busy
             } else {
-                Outcome::Failed(msg)
+                Outcome::Failed(format!("{msg} (the meeting and its audio were kept)"))
             }
         }
     }

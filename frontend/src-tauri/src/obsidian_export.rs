@@ -92,7 +92,7 @@ fn timestamp(seconds: f64) -> String {
 
 /// Markdown of a stored summary (`summary_processes.result`), from its
 /// `markdown` field.
-// shortcut: summaries without `markdown` (legacy sections, BlockNote-only) are skipped, convert them if old meetings need exporting
+// shortcut: summaries without `markdown` (legacy sections, BlockNote-only) fail the export, convert them if old meetings need exporting
 pub fn summary_markdown(summary: &Value) -> Option<String> {
     let markdown = summary.get("markdown").and_then(Value::as_str)?;
     // Same cleaning as the meeting page: strips model reasoning envelopes.
@@ -234,10 +234,15 @@ async fn load_note(pool: &SqlitePool, meeting_id: &str) -> anyhow::Result<NoteIn
     let stored = SummaryProcessesRepository::get_summary_data_for_meeting(pool, meeting_id)
         .await?
         .and_then(|process| process.result);
-    // An unreadable summary fails the export rather than erasing the
-    // summary from an existing note.
+    // An unreadable summary, or one without Markdown (legacy sections, or an
+    // editor save whose Markdown conversion failed), fails the export rather
+    // than erasing the summary from an existing note.
     let summary_markdown = match stored {
-        Some(result) => summary_markdown(&serde_json::from_str::<Value>(&result)?),
+        Some(result) => Some(
+            summary_markdown(&serde_json::from_str::<Value>(&result)?).ok_or_else(|| {
+                anyhow::anyhow!("the summary has no Markdown version; re-save or regenerate it")
+            })?,
+        ),
         None => None,
     };
     let mut transcript: Vec<Segment> = meeting

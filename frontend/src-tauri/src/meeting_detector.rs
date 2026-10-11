@@ -479,6 +479,7 @@ mod tests {
         assert!(polls(&mut d, &mut now, 10, false, true).is_empty());
         assert_eq!(polls(&mut d, &mut now, 1, false, true), vec![Action::Stop]);
         assert_eq!(d.state(), State::Stopping);
+        assert!(polls(&mut d, &mut now, 4, true, true).is_empty()); // polls while stopping do nothing
         d.stop_finished(true, now);
         assert_eq!(d.state(), State::Idle);
     }

@@ -220,10 +220,10 @@ recording runs; no Tauri signature or payload changes). Original design:
    `get_language_preference_internal()` (`None` for Parakeet). Its own
    progress/complete events reach the UI; the meeting page's existing
    listeners show progress if open.
-3. Classify (`pub const` prefixes in `retranscription.rs`, matched with
-   `starts_with`): `ALREADY_IN_PROGRESS` → retry every 10 s, up to 30 min,
-   then treat as failure; `NO_AUDIO_FILE` / `NO_SPEECH` → empty; `Ok` → empty
-   check; other → failure (keep meeting and audio, notify "Transcription
+3. Classify (`pub const ALREADY_IN_PROGRESS` in `retranscription.rs`,
+   matched with `starts_with`): `ALREADY_IN_PROGRESS` → retry every 10 s, up
+   to 30 min, then treat as failure; `Ok` → ready; other (including batch
+   "no audio" / "no speech": the VAD already heard speech) → failure (keep meeting and audio, notify "Transcription
    failed, retry from the meeting page").
 4. Emit `meeting-ready { meeting_id }` or `meeting-discarded`. A new
    listener in `RecordingPostProcessingProvider` refetches the meeting list
@@ -253,8 +253,8 @@ resolves inside `get_default_recordings_folder()` and no other meeting uses
 it. Revision 5's word-count rule was dropped after two reviews found
 transcription paths that silently yield no words for real speech.
 
-For record-only recordings (step 4) the worker uses the batch result
-instead: `NO_SPEECH` / `NO_AUDIO_FILE` → `discard_meeting`.
+As built, record-only recordings (step 4) use the same VAD evidence before
+the batch; a batch "no speech" is a failure that keeps the meeting.
 
 ### 5. Obsidian export (opt-in per meeting)
 
