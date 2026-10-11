@@ -73,7 +73,7 @@ pub fn session_stopped(folder: Option<&str>) {
     *last_stopped() = folder.map(|f| (f.to_string(), evidence));
 }
 
-fn evidence_for(folder: &str) -> Option<Evidence> {
+pub fn evidence_for(folder: &str) -> Option<Evidence> {
     last_stopped()
         .as_ref()
         .filter(|(f, _)| f == folder)

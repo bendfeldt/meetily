@@ -209,8 +209,10 @@ the loopkit skills; the condensed review log is at the end.
 
 ### 4. After stop
 
-**Record-only worker** (`audio/after_meeting.rs`; one tokio task, FIFO
-queue):
+**Record-only worker** (implemented in step 4 as `after_meeting.rs`; see
+`IMPLEMENTATION_PLAN.md` for the as-built differences: emptiness is decided
+by the step-3 VAD evidence, not the batch result; the worker waits while any
+recording runs; no Tauri signature or payload changes). Original design:
 1. Save the meeting (`api_save_transcript`'s inner save, zero transcripts,
    folder path).
 2. Wait while a live recording is running (`is_recording()`, poll 5 s), then

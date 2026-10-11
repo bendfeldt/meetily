@@ -32,7 +32,20 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   folder removed only inside the recordings root and when not shared.
   Hooks: `RecordingManager::start_recording`, `pipeline.rs` (VAD segments
   and errors), `stop_recording`.
-- Next: step 4, record-only plumbing + after-meeting worker.
+- Step 4 done: record-only pop-up recordings (`after_meeting.rs`).
+  `start_popup_recording` (debug command `start_popup_recording_command`
+  until step 5) starts with the preferred devices; record-only when the
+  provider can batch (localWhisper/whisper/parakeet), live otherwise. No
+  live transcription task; audio save forced. On stop, a FIFO worker saves
+  the meeting, waits while any recording runs, batch-transcribes with the
+  configured model/language, and emits meeting-ready / meeting-discarded /
+  meeting-transcription-failed. Emptiness uses the step-3 VAD evidence;
+  batch "no audio"/"no speech" keeps the meeting. Uses upstream's beta
+  retranscribe engine regardless of the beta toggle.
+  The record-only request is bound to the pop-up's meeting name, so a
+  concurrent manual start cannot take it. Emptiness inherits step 3's
+  documented VAD limits (bursts under 250 ms, the last <600 ms window).
+- Next: step 5, Teams detector + pop-up + toggle.
 
 ## Evidence gaps
 
@@ -42,6 +55,12 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 - Empty-recording deletion not exercised with real audio: silence vs. speech
   detection relies on upstream's VAD, covered only by unit tests of the rule
   and the delete path.
+- Record-only flow not exercised in the running app: start, batch
+  transcription, and the worker events are covered only by unit tests of
+  the pure parts. Known upstream-level risks kept: a recording started
+  during a batch job can unload the engine under it; a failed
+  `stop_recording` (stream stop error) leaves `IS_RECORDING` set, which
+  also blocks the worker.
 - Edits made to an exported note in Obsidian are overwritten on the next
   sync (accepted). Changing the export folder leaves old notes unsynced.
 

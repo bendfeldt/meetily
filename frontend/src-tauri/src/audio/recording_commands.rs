@@ -425,6 +425,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start();
+    crate::after_meeting::begin_session(false); // fork-only: manual starts are live
     drop(engine_lifecycle_guard);
 
     // Start optimized parallel transcription task and store handle
@@ -511,6 +512,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     if current_recording_state {
         return Err("Recording already in progress".to_string());
     }
+    let record_only = crate::after_meeting::take_record_only_request(meeting_name.as_deref()); // fork-only
 
     if let Err(error) = crate::ensure_onnx_runtime_available() {
         return Err(map_recording_start_error(
@@ -563,7 +565,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     let auto_save = match super::recording_preferences::load_recording_preferences(&app).await {
         Ok(prefs) => {
             info!("📋 Loaded recording preferences: auto_save={}", prefs.auto_save);
-            prefs.auto_save
+            prefs.auto_save || record_only // fork-only: the file is the only transcript source
         }
         Err(e) => {
             warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
@@ -612,10 +614,18 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Flip recording live + reset per-session flags (speech-detected latch,
     // mic-recovery budget). Shared with the other start path — see helper.
     finalize_recording_start();
+    crate::after_meeting::begin_session(record_only); // fork-only
     drop(engine_lifecycle_guard);
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
+    // Fork: record-only recordings are transcribed after the meeting; just
+    // drain the VAD segments so the pipeline's sends succeed.
+    let task_handle = if record_only {
+        let mut receiver = transcription_receiver;
+        tokio::spawn(async move { while receiver.recv().await.is_some() {} })
+    } else {
+        transcription::start_transcription_task(app.clone(), transcription_receiver)
+    };
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);
@@ -1080,6 +1090,7 @@ pub async fn stop_recording<R: Runtime>(
     );
 
     crate::empty_recordings::session_stopped(folder_path_str.as_deref()); // fork-only
+    crate::after_meeting::on_recording_stopped(&app, folder_path_str.as_deref(), meeting_name_str.as_deref()); // fork-only
     // Emit final stop event with folder_path and meeting_name for frontend to save
     app.emit(
         "recording-stopped",

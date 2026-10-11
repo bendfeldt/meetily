@@ -137,6 +137,25 @@ export function useRecordingStop(
     const stopStartTime = Date.now();
 
     try {
+      // Fork (bendfeldt/meetily): a record-only recording is saved and
+      // transcribed by the Rust after-meeting worker; nothing to save here.
+      // shortcut: if this query fails, a record-only recording is also saved here (duplicate meeting, no data loss); retry the query if that shows up
+      if (isCallApi && await invoke<boolean>('last_recording_was_record_only').catch((error) => {
+        console.error('Could not ask whether the recording was record-only:', error);
+        return false;
+      })) {
+        await markMeetingAsSaved();
+        sessionStorage.removeItem('last_recording_folder_path');
+        sessionStorage.removeItem('last_recording_meeting_name');
+        sessionStorage.removeItem('indexeddb_current_meeting_id');
+        clearTranscripts();
+        setStatus(RecordingStatus.IDLE);
+        setIsMeetingActive(false);
+        setIsRecordingDisabled(false);
+        toast.info('Recording saved, transcribing in the background');
+        return;
+      }
+
       console.log('Post-stop processing (new implementation)...', {
         stop_initiated_at: new Date(stopStartTime).toISOString(),
         current_transcript_count: transcriptsRef.current.length

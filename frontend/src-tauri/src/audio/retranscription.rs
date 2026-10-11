@@ -26,6 +26,11 @@ static RETRANSCRIPTION_CANCELLED: AtomicBool = AtomicBool::new(false);
 /// Ensures flag is cleared even if retranscription panics or returns early
 struct RetranscriptionGuard;
 
+// Fork (bendfeldt/meetily): error prefixes the after-meeting worker matches on.
+pub const ALREADY_IN_PROGRESS: &str = "Retranscription already in progress";
+pub const NO_AUDIO_FILE: &str = "No audio file found in:";
+pub const NO_SPEECH: &str = "No speech detected in audio file";
+
 impl RetranscriptionGuard {
     /// Create guard and set flag atomically
     fn acquire() -> Result<Self, String> {
@@ -33,7 +38,7 @@ impl RetranscriptionGuard {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Err("Retranscription already in progress".to_string());
+            return Err(ALREADY_IN_PROGRESS.to_string());
         }
         Ok(RetranscriptionGuard)
     }
@@ -166,7 +171,7 @@ fn find_audio_file(folder: &Path) -> Result<PathBuf> {
         }
     }
 
-    Err(anyhow!("No audio file found in: {}", folder.display()))
+    Err(anyhow!("{} {}", NO_AUDIO_FILE, folder.display()))
 }
 
 /// Internal function to run retranscription
@@ -294,7 +299,7 @@ async fn run_retranscription<R: Runtime>(
 
     if total_segments == 0 {
         warn!("No speech detected in audio");
-        return Err(anyhow!("No speech detected in audio file"));
+        return Err(anyhow!(NO_SPEECH));
     }
 
     emit_progress(&app, &meeting_id, "transcribing", 25, "Loading transcription engine...");
