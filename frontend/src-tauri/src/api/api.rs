@@ -1156,22 +1156,35 @@ pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<S
 }
 
 /// Only web links may be handed to the OS opener; anything else (local paths,
-/// `file:`, `javascript:`) could launch an arbitrary app or file.
-fn is_allowed_external_url(url: &str) -> bool {
-    url.starts_with("https://")
+/// `file:`, `javascript:`) could launch an arbitrary app or file. Returns the
+/// normalized URL to pass on, or `None` if it is not an acceptable https link.
+fn parse_external_url(raw: &str) -> Option<String> {
+    if raw.len() > 2048
+        || raw.chars().any(|c| c.is_whitespace() || c.is_control() || c == '"')
+        // The parser accepts `https:host`; require the explicit `//` form.
+        || !raw.get(..8)?.eq_ignore_ascii_case("https://")
+    {
+        return None;
+    }
+    let url = url::Url::parse(raw).ok()?;
+    if url.scheme() != "https" || url.host_str().unwrap_or("").is_empty() {
+        return None;
+    }
+    Some(url.into())
 }
 
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     use std::process::Command;
 
-    if !is_allowed_external_url(&url) {
-        return Err("Only https:// URLs can be opened".to_string());
-    }
+    let url = parse_external_url(&url).ok_or("Only https:// URLs can be opened")?;
 
     let result = if cfg!(target_os = "windows") {
         // Not `cmd /C start`: cmd treats `&` in the URL as a command separator.
-        Command::new("explorer").arg(&url).output()
+        // FileProtocolHandler hands the URL to ShellExecute without a shell.
+        Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .output()
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg(&url).output()
     } else {
@@ -1415,18 +1428,38 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::is_allowed_external_url;
+    use super::parse_external_url;
 
     #[test]
     fn external_url_accepts_https_only() {
-        assert!(is_allowed_external_url("https://ollama.com/download"));
-        assert!(is_allowed_external_url(
-            "https://meetily.zackriya.com/#about"
-        ));
-        assert!(!is_allowed_external_url("file:///etc/passwd"));
-        assert!(!is_allowed_external_url("/Applications/Calculator.app"));
-        assert!(!is_allowed_external_url("javascript:alert(1)"));
-        assert!(!is_allowed_external_url("http://example.com"));
-        assert!(!is_allowed_external_url(""));
+        assert_eq!(
+            parse_external_url("https://ollama.com/download").as_deref(),
+            Some("https://ollama.com/download")
+        );
+        assert_eq!(
+            parse_external_url("https://meetily.zackriya.com/#about").as_deref(),
+            Some("https://meetily.zackriya.com/#about")
+        );
+        // Scheme is case-insensitive; the parser normalizes it.
+        assert_eq!(
+            parse_external_url("HTTPS://example.com").as_deref(),
+            Some("https://example.com/")
+        );
+        for bad in [
+            "file:///etc/passwd",
+            "/Applications/Calculator.app",
+            "javascript:alert(1)",
+            "http://example.com",
+            "",
+            " https://example.com",
+            "https:example.com",
+            "https://",
+            "https://example.com/\"a",
+            "https://example.com/\ncalc",
+        ] {
+            assert_eq!(parse_external_url(bad), None, "{bad:?}");
+        }
+        let long = format!("https://example.com/{}", "a".repeat(2048));
+        assert_eq!(parse_external_url(&long), None);
     }
 }
