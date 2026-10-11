@@ -91,14 +91,18 @@ Note A: STATUS_A_PLACEHOLDER
 Several branches have more than one commit (review rounds); squash on merge.
 The PR body for each is in `docs/handoff/upstream/<branch>.md`.
 
-Merge conflicts between these branches (checked by merging all into
-`upstream/devtest`): `audio-errors-keep-recording` conflicts with
-`stop-keeps-transcript-and-duration` (`recording_state.rs`), and
-`delete-meeting-folder` conflicts with `command-hardening` (`api.rs`). Open
-both; whichever upstream merges second needs a rebase onto the new devtest
-(ask Claude Code: "rebase fix/<topic> onto upstream/devtest and resolve").
-All other branches merged together cleanly: 283 Rust tests and `tsc` pass on
-the combined tree.
+Merge conflicts between these branches (checked by merging all of them into
+`upstream/devtest` in table order):
+
+- `audio-errors-keep-recording` ↔ `stop-keeps-transcript-and-duration` (`recording_state.rs`)
+- `delete-meeting-folder` ↔ `command-hardening` (`api.rs`)
+- `whisper-part-download` ↔ `whisper-filler-filter` (`whisper_engine.rs`)
+
+Open them all; whichever of a pair upstream merges second needs a rebase
+onto the new devtest (ask Claude Code: "rebase fix/<topic> onto
+upstream/devtest and resolve the conflict, then run cargo test"). The other
+12 branches merged together cleanly: 280 Rust tests and `tsc` pass on the
+combined tree (Linux).
 
 ## 4. When upstream merges these: fork follow-ups
 
