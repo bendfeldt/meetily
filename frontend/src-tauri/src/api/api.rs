@@ -791,25 +791,39 @@ fn folder_inside_root(folder: &Path, root: &Path) -> Result<PathBuf, String> {
     Ok(folder)
 }
 
-/// True if any other meeting's folder (after resolving it) is `dir`, is
-/// inside `dir`, or contains `dir`. Unresolvable paths are ignored.
-fn folder_shared(dir: &Path, other_folders: &[String]) -> bool {
-    // macOS and Windows file systems are usually case-insensitive.
-    let norm = |p: &Path| -> PathBuf {
-        if cfg!(any(target_os = "macos", target_os = "windows")) {
-            PathBuf::from(p.to_string_lossy().to_lowercase())
-        } else {
-            p.to_path_buf()
-        }
-    };
-    let dir = norm(dir);
-    other_folders
+/// Returns why `dir` must be kept if another meeting may use it: its resolved
+/// folder is `dir`, inside `dir`, or contains `dir`; or its path cannot be
+/// resolved but ends in the same folder name. Compared case-insensitively:
+/// a false match only keeps a folder, it never deletes more.
+fn folder_shared(dir: &Path, other_folders: &[String]) -> Option<&'static str> {
+    let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    let dir_lower = lower(dir);
+    let dir_name = name(dir);
+    for other in other_folders
         .iter()
-        .map(Path::new)
-        .filter(|p| p.is_absolute())
-        .filter_map(|p| p.canonicalize().ok())
-        .map(|p| norm(&p))
-        .any(|other| other.starts_with(&dir) || dir.starts_with(&other))
+        .map(|f| f.trim())
+        .filter(|f| !f.is_empty())
+    {
+        let other = Path::new(other);
+        match other
+            .is_absolute()
+            .then(|| other.canonicalize().ok())
+            .flatten()
+        {
+            Some(resolved) => {
+                let resolved = lower(&resolved);
+                if resolved.starts_with(&dir_lower) || dir_lower.starts_with(&resolved) {
+                    return Some("used by another meeting");
+                }
+            }
+            None if name(other) == dir_name => {
+                return Some("another meeting has an unresolvable path with the same folder name");
+            }
+            None => {}
+        }
+    }
+    None
 }
 
 /// Deletes the meeting's rows, then its recording folder when that folder is
@@ -852,10 +866,11 @@ async fn delete_meeting_and_folder(
             return Ok(true);
         }
     };
-    if folder_shared(&dir, &other_folders) {
+    if let Some(reason) = folder_shared(&dir, &other_folders) {
         log_warn!(
-            "Kept recording folder of meeting {}: used by another meeting",
-            meeting_id
+            "Kept recording folder of meeting {}: {}",
+            meeting_id,
+            reason
         );
     } else if let Err(e) = std::fs::remove_dir_all(&dir) {
         log_warn!(
@@ -1603,6 +1618,7 @@ mod tests {
         assert_eq!(left, 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn null_empty_or_relative_folder_path_removes_nothing() {
         let pool = db().await;
@@ -1676,5 +1692,37 @@ mod tests {
             assert!(delete_meeting_and_folder(&pool, "a1", &root).await.unwrap());
             assert!(real.exists(), "same folder reached through a symlink");
         }
+    }
+
+    #[tokio::test]
+    async fn case_variants_and_unresolvable_same_name_paths_keep_the_folder() {
+        let pool = db().await;
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("recordings");
+        let upper = root.join("Case");
+        let named = root.join("Standup");
+        let free = root.join("free");
+        for dir in [&upper, &root.join("case"), &named, &free] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+
+        // Case variant of another meeting's folder: treated as the same.
+        add_meeting(&pool, "u1", &upper).await;
+        add_meeting(&pool, "u2", &root.join("case")).await;
+        assert!(delete_meeting_and_folder(&pool, "u1", &root).await.unwrap());
+        assert!(upper.exists(), "case variant must keep the folder");
+
+        // Unresolvable paths ending in the same folder name keep it.
+        add_meeting(&pool, "n1", &named).await;
+        add_meeting_raw(&pool, "n2", Some("old/standup/")).await;
+        add_meeting_raw(&pool, "n3", Some("/does/not/exist/Standup")).await;
+        assert!(delete_meeting_and_folder(&pool, "n1", &root).await.unwrap());
+        assert!(named.exists(), "same-name unresolvable path must keep it");
+
+        // An unresolvable path with another name does not block removal.
+        add_meeting(&pool, "f1", &free).await;
+        add_meeting_raw(&pool, "f2", Some("/does/not/exist/other")).await;
+        assert!(delete_meeting_and_folder(&pool, "f1", &root).await.unwrap());
+        assert!(!free.exists());
     }
 }
