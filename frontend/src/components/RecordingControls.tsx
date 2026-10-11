@@ -245,9 +245,16 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     };
   }, []);
 
+  // page.tsx passes a new arrow every render; read it through a ref so the
+  // listeners below are registered once instead of on every re-render.
+  const onTranscriptionErrorRef = useRef(onTranscriptionError);
+  onTranscriptionErrorRef.current = onTranscriptionError;
+
   useEffect(() => {
     console.log('Setting up recording event listeners');
     let unsubscribes: (() => void)[] = [];
+    // Unmount can run before the awaits below resolve; drop late listeners.
+    let cancelled = false;
 
     const setupListeners = async () => {
       try {
@@ -266,12 +273,11 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             return newCount;
           });
           setIsProcessing(false);
-          console.log('Calling onRecordingStop(false) due to transcript error');
-          onRecordingStop(false);
-          if (onTranscriptionError) {
-            onTranscriptionError(errorMessage);
-          }
+          // A transcription error does not end the recording; only report it.
+          onTranscriptionErrorRef.current?.(errorMessage);
         });
+        if (cancelled) { transcriptErrorUnsubscribe(); return; }
+        unsubscribes.push(transcriptErrorUnsubscribe);
 
         // Transcription error listener - handles structured error objects with actionable flag
         const transcriptionErrorUnsubscribe = await listen<TranscriptionErrorPayload>('transcription-error', (event) => {
@@ -290,14 +296,13 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           });
           setIsProcessing(false);
 
-          if (event.payload.phase === 'active') {
-            console.log('Calling onRecordingStop(false) due to active transcription error');
-            onRecordingStop(false);
-          }
-
+          // Rust emits 'active' errors for a single failed chunk (or a failed
+          // engine init) and keeps recording, so the UI must not stop here.
           // For actionable errors (like model loading failures), the main page will handle showing the model selector
           // For regular errors, they are handled by useModalState global listener which shows a toast
         });
+        if (cancelled) { transcriptionErrorUnsubscribe(); return; }
+        unsubscribes.push(transcriptionErrorUnsubscribe);
 
         // Pause/Resume events are now handled by RecordingStateContext
         // No need for duplicate listeners here
@@ -307,12 +312,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           console.log('speech-detected event received:', event);
           setSpeechDetected(true);
         });
-
-        unsubscribes = [
-          transcriptErrorUnsubscribe,
-          transcriptionErrorUnsubscribe,
-          speechDetectedUnsubscribe
-        ];
+        if (cancelled) { speechDetectedUnsubscribe(); return; }
+        unsubscribes.push(speechDetectedUnsubscribe);
         console.log('Recording event listeners set up successfully');
       } catch (error) {
         console.error('Failed to set up recording event listeners:', error);
@@ -323,13 +324,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
     return () => {
       console.log('Cleaning up recording event listeners');
+      cancelled = true;
       unsubscribes.forEach(unsubscribe => {
         if (unsubscribe && typeof unsubscribe === 'function') {
           unsubscribe();
         }
       });
     };
-  }, [onRecordingStop, onTranscriptionError]);
+  }, []);
 
   return (
     <TooltipProvider>
