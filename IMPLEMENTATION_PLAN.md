@@ -45,13 +45,51 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   The record-only request is bound to the pop-up's meeting name, so a
   concurrent manual start cannot take it. Emptiness inherits step 3's
   documented VAD limits (bursts under 250 ms, the last <600 ms window).
-- Next: step 5, Teams detector + pop-up + toggle.
+- Step 5 done: Teams detector (`meeting_detector.rs`: pure state
+  machine + 0.5 s CoreAudio poll of `com.microsoft.teams*` processes with
+  an active input stream), non-activating NSPanel pop-up
+  (`meeting_prompt.rs`, `public/meeting-prompt.html`, `tauri-nspanel` pinned
+  to 18ffb9a), Settings section (`ForkSettings.tsx`: toggle, off by
+  default; export folder). Auto-stop 5 s after Teams releases the mic, or
+  after 4 h at most (Teams has been reported to keep the mic open after a
+  call). As built, differing from docs/plans/teams-auto-capture.md:
+  - The pop-up is a static `public/meeting-prompt.html` + `.js`, not a Next
+    page, so the app layout and providers do not load into it.
+  - The panel is created the first time the setting is on, so toggle-off
+    users get no extra window. It has its own `meeting-prompt` capability
+    (`core:default`, no plugin access). App commands stay callable from it,
+    as from the main window: the app has no app manifest, so Tauri does not
+    gate app commands for local pages.
+  - "Not now" lasts until Teams has released the mic for 5 s (the end
+    grace), so a brief mic flap does not re-prompt.
+  - The stop emits `recording-stop-complete` like the tray; record-only
+    stops are skipped by the frontend's `last_recording_was_record_only`
+    check.
+  - A failed auto-stop keeps managing the recording and retries after
+    another end grace (or another 4 h); notifies once. A stop error while
+    no recording runs (stopped from the tray at the same moment) counts as
+    stopped.
+  - Settings shows "Unavailable: …" when CoreAudio process listing fails
+    (macOS < 14) or the panel cannot be set up; switching the toggle off
+    and on retries.
+  - The detector loop reads `fork_settings.json` every 0.5 s even when off
+    (an in-memory store read; a broken store warns once).
 
 ## Evidence gaps
 
 - Obsidian export not exercised in the running app (no desktop session):
   folder picker, button, toast, and sync after summary/title changes are
   covered only by unit tests of the pure parts.
+- Teams behaviour (research 2026-10-11, Microsoft Learn + Notion, see
+  docs/plans/teams-auto-capture.md): bundle ids documented
+  (com.microsoft.teams2, classic com.microsoft.teams; helper
+  com.microsoft.teams2.helper per Talos). NOT documented: mic opened on the
+  pre-join screen, mic held while muted (indirect evidence only: "you're
+  muted" warning), mic released on leave (user reports say it can stay
+  held), which process owns the stream. "Don't use audio" / room / phone
+  audio give no signal. All assumed, untested until a real call.
+- Pop-up over full-screen Spaces and focus behaviour: macOS CI compiles it;
+  not exercised on a Mac.
 - Empty-recording deletion not exercised with real audio: silence vs. speech
   detection relies on upstream's VAD, covered only by unit tests of the rule
   and the delete path.

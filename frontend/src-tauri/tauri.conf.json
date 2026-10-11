@@ -74,6 +74,16 @@
                             ]
                         }
                     ]
+                },
+                {
+                    "identifier": "meeting-prompt",
+                    "description": "Fork-only: Teams meeting pop-up. Core permissions only, no plugin access (fs, store, updater...). App commands are not ACL-gated in this app (no app manifest), as for the main window",
+                    "windows": [
+                        "meeting-prompt"
+                    ],
+                    "permissions": [
+                        "core:default"
+                    ]
                 }
             ]
         }

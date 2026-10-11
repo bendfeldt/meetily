@@ -356,3 +356,28 @@ Each item is small but must not be forgotten:
   column, missing npm dialog package, settings contradiction. User decisions:
   macOS CI + assume upstream-proven behaviour; live fallback for cloud
   providers; rename notes; export opt-in via a button.
+
+## Teams behaviour research (2026-10-11)
+
+Subagent review of Microsoft Learn / Microsoft support / Tech Community and
+the user's Notion workspace (Notion has nothing on Teams microphone
+behaviour; it holds the "Project Kenku" local meeting-notes plan that lists
+meetily as a fallback and Obsidian as the notes target).
+
+| Assumption | Verdict | Evidence |
+|---|---|---|
+| Bundle ids | Confirmed | `com.microsoft.teams2` (new), `com.microsoft.teams` (classic); helper `com.microsoft.teams2.helper` (Talos TALOS-2024-1990). All start with `com.microsoft.teams`. |
+| Mic opens on pre-join | Not documented | Only a "Test mic and speaker" pre-join option is documented. |
+| Mic held while muted | Not documented (indirect yes) | Teams warns "you're muted" when you speak, so it keeps reading input. |
+| Mic released on leave | Partly contradicted | Microsoft Q&A users report the mic staying in use after calls until Teams quits. Added a 4 h maximum recording as a safety net. |
+| Which process owns the stream | Not documented | Prefix match covers main app and helpers; logged on first use. |
+| Breakers | Documented | "Don't use audio", room or phone audio: no mic stream, no prompt. |
+
+Sources: learn.microsoft.com/en-us/microsoftteams/new-teams-bulk-install-client,
+learn.microsoft.com/en-us/answers/questions/498839,
+learn.microsoft.com/en-us/answers/a/8486173,
+talosintelligence.com/vulnerability_reports/TALOS-2024-1990,
+support.microsoft.com (muting and unmuting your mic in Teams). Several pages
+were read only through search summaries (the fetch tool could not resolve
+the Microsoft hosts).
+
