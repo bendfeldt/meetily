@@ -57,16 +57,21 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
     page, so the app layout and providers do not load into it.
   - The panel is created the first time the setting is on, so toggle-off
     users get no extra window. It has its own `meeting-prompt` capability
-    (`core:default` only), not the main window's.
+    (`core:default`, no plugin access). App commands stay callable from it,
+    as from the main window: the app has no app manifest, so Tauri does not
+    gate app commands for local pages.
   - "Not now" lasts until Teams has released the mic for 5 s (the end
     grace), so a brief mic flap does not re-prompt.
   - The stop emits `recording-stop-complete` like the tray; record-only
     stops are skipped by the frontend's `last_recording_was_record_only`
     check.
   - A failed auto-stop keeps managing the recording and retries after
-    another end grace (or another 4 h); notifies once.
+    another end grace (or another 4 h); notifies once. A stop error while
+    no recording runs (stopped from the tray at the same moment) counts as
+    stopped.
   - Settings shows "Unavailable: …" when CoreAudio process listing fails
-    (macOS < 14) or the panel cannot be created.
+    (macOS < 14) or the panel cannot be set up; switching the toggle off
+    and on retries.
   - The detector loop reads `fork_settings.json` every 0.5 s even when off
     (an in-memory store read; a broken store warns once).
 

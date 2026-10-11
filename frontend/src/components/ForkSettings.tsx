@@ -32,10 +32,18 @@ export function ForkSettings() {
   if (!settings) return null;
 
   const setTeamsPrompt = async (enabled: boolean) => {
-    const next = { ...settings, teams_prompt_enabled: enabled };
     try {
-      await invoke('set_fork_settings', { settings: next });
+      await invoke('set_teams_prompt_enabled', { enabled });
       setSettings((current) => current && { ...current, teams_prompt_enabled: enabled });
+      setTeamsUnavailable(null);
+      // The pop-up is set up on the next detector poll; show its outcome.
+      if (enabled) {
+        setTimeout(() => {
+          invoke<string | null>('teams_prompt_unavailable')
+            .then(setTeamsUnavailable)
+            .catch(() => setTeamsUnavailable(null));
+        }, 2000);
+      }
     } catch (error) {
       toast.error('Could not save setting', { description: String(error) });
     }

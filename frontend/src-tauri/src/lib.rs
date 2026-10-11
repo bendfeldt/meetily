@@ -525,7 +525,12 @@ pub fn run() {
                 let handle = _app.handle();
                 match handle.plugin(tauri_nspanel::init()) {
                     Ok(()) => meeting_detector::start(handle.clone()),
-                    Err(e) => log::error!("Teams meeting pop-up unavailable: {}", e),
+                    Err(e) => {
+                        log::error!("Teams meeting pop-up unavailable: {}", e);
+                        meeting_detector::set_unavailable(&format!(
+                            "The pop-up could not be set up: {e}"
+                        ));
+                    }
                 }
             }
 
@@ -787,7 +792,7 @@ pub fn run() {
             after_meeting::start_popup_recording_command,
             after_meeting::last_recording_was_record_only,
             fork_settings::get_fork_settings,
-            fork_settings::set_fork_settings,
+            fork_settings::set_teams_prompt_enabled,
             meeting_detector::meeting_prompt_respond,
             meeting_detector::teams_prompt_unavailable,
             audio::recording_preferences::get_recording_preferences,

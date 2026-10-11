@@ -226,8 +226,8 @@ mod probe {
                 // CoreAudio process objects need macOS 14+.
                 if !WARNED.swap(true, Ordering::Relaxed) {
                     log::warn!("meeting_detector: cannot list audio processes ({e:?}); Teams detection is unavailable");
-                    super::set_unavailable("Teams detection needs macOS 14 or later.");
                 }
+                super::set_unavailable("Teams detection needs macOS 14 or later.");
                 Vec::new()
             }
         }
@@ -245,9 +245,16 @@ static UI: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<bool>> =
 static UNAVAILABLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn set_unavailable(reason: &str) {
+pub(crate) fn set_unavailable(reason: &str) {
     if let Ok(mut slot) = UNAVAILABLE.lock() {
         slot.get_or_insert_with(|| reason.to_string());
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn clear_unavailable() {
+    if let Ok(mut slot) = UNAVAILABLE.lock() {
+        *slot = None;
     }
 }
 
@@ -307,6 +314,11 @@ mod runner {
                 true
             }
             Err(e) => {
+                // Already stopped (e.g. from the tray at the same moment).
+                if !crate::audio::recording_commands::is_recording().await {
+                    log::info!("meeting_detector: recording already stopped ({e})");
+                    return true;
+                }
                 log::error!("meeting_detector: stopping the recording failed: {e}");
                 false
             }
@@ -367,15 +379,24 @@ mod runner {
             let mut interval = tokio::time::interval(POLL);
             let mut was_enabled = false;
             let mut panel_ready = false;
+            let mut panel_failed = false;
+            let mut setting_was_on = false;
             let mut last_holders: Vec<String> = Vec::new();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         let mut enabled = crate::fork_settings::load(&app).teams_prompt_enabled;
-                        if enabled && !panel_ready && teams_prompt_unavailable().is_none() {
+                        if enabled && !setting_was_on {
+                            // Switched on: retry a failed panel, re-check the probe.
+                            panel_failed = false;
+                            clear_unavailable();
+                        }
+                        setting_was_on = enabled;
+                        if enabled && !panel_ready && !panel_failed {
                             match crate::meeting_prompt::ensure(&app).await {
                                 Ok(()) => panel_ready = true,
                                 Err(e) => {
+                                    panel_failed = true;
                                     log::error!("meeting_detector: Teams pop-up unavailable: {e}");
                                     set_unavailable(&format!("The pop-up could not be created: {e}"));
                                 }

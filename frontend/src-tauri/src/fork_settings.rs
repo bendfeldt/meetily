@@ -63,11 +63,14 @@ pub async fn get_fork_settings<R: Runtime>(app: AppHandle<R>) -> Result<ForkSett
     Ok(load(&app))
 }
 
+/// Changes only the toggle, so a folder saved meanwhile is kept.
 #[tauri::command]
-pub async fn set_fork_settings<R: Runtime>(
+pub async fn set_teams_prompt_enabled<R: Runtime>(
     app: AppHandle<R>,
-    settings: ForkSettings,
+    enabled: bool,
 ) -> Result<(), String> {
+    let mut settings = load(&app);
+    settings.teams_prompt_enabled = enabled;
     save(&app, &settings).map_err(|e| e.to_string())
 }
 
