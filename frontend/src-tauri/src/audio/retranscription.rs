@@ -791,6 +791,13 @@ pub async fn start_retranscription_command<R: Runtime>(
     if RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst) {
         return Err("Retranscription already in progress".to_string());
     }
+    if let Some(reason) = super::common::engine_busy_reason(
+        super::recording_commands::is_recording().await,
+        false,
+        super::import::is_import_in_progress(),
+    ) {
+        return Err(reason.to_string());
+    }
 
     // Clone values for the spawned task
     let meeting_id_clone = meeting_id.clone();

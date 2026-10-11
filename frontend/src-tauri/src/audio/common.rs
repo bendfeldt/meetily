@@ -14,6 +14,25 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
 }
 
+/// Live recording, retranscription and import share one global engine with one
+/// loaded model, so a second user would swap or unload the model under the first.
+/// Returns why a new job must not start, or `None` when the engine is free.
+pub(crate) fn engine_busy_reason(
+    recording: bool,
+    retranscribing: bool,
+    importing: bool,
+) -> Option<&'static str> {
+    if recording {
+        Some("Stop the recording first. It uses the same transcription model.")
+    } else if retranscribing {
+        Some("Wait for the re-transcription to finish first. It uses the same transcription model.")
+    } else if importing {
+        Some("Wait for the audio import to finish first. It uses the same transcription model.")
+    } else {
+        None
+    }
+}
+
 /// Unload the transcription engine after a batch job (import or retranscription).
 /// Skips unloading if a live recording is currently in progress, since recording
 /// uses the same global engine instances.
@@ -232,5 +251,27 @@ mod tests {
 
         acquired_rx.await.unwrap();
         waiter.await.unwrap();
+    }
+
+    #[test]
+    fn test_engine_busy_reason_blocks_any_other_engine_user() {
+        assert_eq!(engine_busy_reason(false, false, false), None);
+        assert!(engine_busy_reason(true, false, false)
+            .unwrap()
+            .contains("Stop the recording"));
+        assert!(engine_busy_reason(false, true, false)
+            .unwrap()
+            .contains("re-transcription"));
+        assert!(engine_busy_reason(false, false, true)
+            .unwrap()
+            .contains("import"));
+        // The recording-start UI treats "already in progress" as "a recording is live".
+        for reason in [
+            engine_busy_reason(true, false, false),
+            engine_busy_reason(false, true, false),
+            engine_busy_reason(false, false, true),
+        ] {
+            assert!(!reason.unwrap().contains("already in progress"));
+        }
     }
 }

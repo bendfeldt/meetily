@@ -322,6 +322,24 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         return Err("Recording already in progress".to_string());
     }
 
+    if let Some(reason) = super::common::engine_busy_reason(
+        false,
+        super::retranscription::is_retranscription_in_progress(),
+        super::import::is_import_in_progress(),
+    ) {
+        // Non-actionable transcription-error is shown as a toast (useModalState)
+        let _ = app.emit(
+            "transcription-error",
+            serde_json::json!({
+                "error": reason,
+                "userMessage": format!("Recording cannot start: {}", reason),
+                "actionable": false,
+                "phase": "startup"
+            }),
+        );
+        return Err(reason.to_string());
+    }
+
     if let Err(error) = crate::ensure_onnx_runtime_available() {
         return Err(map_recording_start_error(
             &app,
@@ -512,6 +530,24 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     info!("🔍 IS_RECORDING state check: {}", current_recording_state);
     if current_recording_state {
         return Err("Recording already in progress".to_string());
+    }
+
+    if let Some(reason) = super::common::engine_busy_reason(
+        false,
+        super::retranscription::is_retranscription_in_progress(),
+        super::import::is_import_in_progress(),
+    ) {
+        // Non-actionable transcription-error is shown as a toast (useModalState)
+        let _ = app.emit(
+            "transcription-error",
+            serde_json::json!({
+                "error": reason,
+                "userMessage": format!("Recording cannot start: {}", reason),
+                "actionable": false,
+                "phase": "startup"
+            }),
+        );
+        return Err(reason.to_string());
     }
 
     if let Err(error) = crate::ensure_onnx_runtime_available() {

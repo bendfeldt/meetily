@@ -974,6 +974,13 @@ pub async fn start_import_audio_command<R: Runtime>(
     if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
         return Err("Import already in progress".to_string());
     }
+    if let Some(reason) = super::common::engine_busy_reason(
+        super::recording_commands::is_recording().await,
+        super::retranscription::is_retranscription_in_progress(),
+        false,
+    ) {
+        return Err(reason.to_string());
+    }
 
     // Spawn import in background
     tauri::async_runtime::spawn(async move {
