@@ -57,6 +57,12 @@ fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         if crate::is_recording().await {
+            // A stop is already draining; don't report a second completion.
+            if crate::audio::recording_commands::is_stop_in_progress() {
+                log::info!("Tray toggle: Stop already in progress");
+                return;
+            }
+
             // Immediately show stopping state
             set_tray_state(&app_clone, RecordingState::Stopping);
 
@@ -156,6 +162,12 @@ fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     focus_main_window(app);
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
+        // A stop is already draining; don't report a second completion.
+        if crate::audio::recording_commands::is_stop_in_progress() {
+            log::info!("Tray: Stop already in progress");
+            return;
+        }
+
         log::info!("Tray: Stopping recording...");
 
         // Generate save path (same as RecordingControls.tsx)

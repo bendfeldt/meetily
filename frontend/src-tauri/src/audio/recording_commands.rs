@@ -69,19 +69,32 @@ fn session_live(s: &Arc<super::RecordingState>) -> bool {
 }
 
 /// RAII guard for the stop-tail flag. Sets `IS_RECORDING_STOPPING` true on
-/// construction and clears it on Drop — including during unwind — so a panic
+/// acquire and clears it on Drop — including during unwind — so a panic
 /// anywhere in the ~320-line stop tail can't leave the flag stuck true and
 /// silently kill the mic-disconnect fallback for every later recording.
 ///
 /// This unwind-clears behaviour depends on `panic = "unwind"` (the default).
 /// If a release profile ever sets `panic = "abort"`, Drop won't run on panic
 /// and the stuck-flag failure mode returns — add a start-time reset then.
+///
+/// Acquiring is a swap, so it also makes stop single-flight: a second stop
+/// (e.g. tray "Stop Recording" clicked while the first is still draining)
+/// gets `None` and must return without touching anything. Only the holder
+/// clears the flag.
 struct StoppingGuard;
 impl StoppingGuard {
-    fn new() -> Self {
-        IS_RECORDING_STOPPING.store(true, Ordering::SeqCst);
-        StoppingGuard
+    fn try_acquire() -> Option<Self> {
+        if IS_RECORDING_STOPPING.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(StoppingGuard)
+        }
     }
+}
+
+/// A stop is already running; callers should not start (or report) another.
+pub fn is_stop_in_progress() -> bool {
+    IS_RECORDING_STOPPING.load(Ordering::SeqCst)
 }
 impl Drop for StoppingGuard {
     fn drop(&mut self) {
@@ -689,6 +702,18 @@ pub async fn stop_recording<R: Runtime>(
         return Ok(());
     }
 
+    // Mark the stop tail as in progress so a mic-disconnect fallback that was
+    // queued before Stop short-circuits instead of retrying against the taken
+    // manager, and so a second stop can't re-enter the tail (it would unload
+    // the model under the first stop's transcription and emit a second
+    // `recording-stopped`). IS_RECORDING itself stays true until the tail
+    // completes — the frontend polls it to keep the stop UI up. RAII so a
+    // panic in the tail below can't leave the flag stuck true.
+    let Some(_stopping_guard) = StoppingGuard::try_acquire() else {
+        info!("Recording stop already in progress; ignoring duplicate stop");
+        return Ok(());
+    };
+
     // Emit shutdown progress to frontend
     let _ = app.emit(
         "recording-shutdown-progress",
@@ -704,13 +729,6 @@ pub async fn stop_recording<R: Runtime>(
         let mut global_manager = RECORDING_MANAGER.lock().unwrap();
         global_manager.take()
     };
-
-    // Mark the stop tail as in progress so a mic-disconnect fallback that was
-    // queued before Stop short-circuits instead of retrying against the taken
-    // manager. IS_RECORDING itself stays true until the tail completes — the
-    // frontend polls it to keep the stop UI up. RAII so a panic in the tail
-    // below can't leave the flag stuck true.
-    let _stopping_guard = StoppingGuard::new();
 
     let stop_result = if let Some(mut manager) = manager_for_cleanup {
         // Use FORCE FLUSH to immediately process all accumulated audio - eliminates 30s delay!
@@ -1694,5 +1712,29 @@ async fn trigger_mic_fallback_to_default<R: Runtime>(
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn second_stop_cannot_acquire_stopping_guard_while_first_runs() {
+        let first = StoppingGuard::try_acquire();
+        assert!(first.is_some(), "first stop must acquire the guard");
+        assert!(
+            StoppingGuard::try_acquire().is_none(),
+            "a second stop while the first is running must be refused"
+        );
+        assert!(IS_RECORDING_STOPPING.load(Ordering::SeqCst));
+
+        drop(first);
+        assert!(!IS_RECORDING_STOPPING.load(Ordering::SeqCst));
+        assert!(
+            StoppingGuard::try_acquire().is_some(),
+            "a later stop must be able to acquire the guard again"
+        );
+        assert!(!IS_RECORDING_STOPPING.load(Ordering::SeqCst));
     }
 }
