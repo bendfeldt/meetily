@@ -68,7 +68,28 @@ title/body. Paste this prompt into Claude Code on your Mac (it has your
 
 Recommended order (most harmful first; conflicts noted):
 
-TABLE_PLACEHOLDER
+| # | Branch (`fix/…`) | Finding(s) | Fixes | Review |
+|---|---|---|---|---|
+| U1 | `audio-errors-keep-recording` | 12, 27 | Glitches no longer silently stop capture; `recording-error` toast | see note A |
+| U2 | `checkpoint-buffer` | 13 | Bounded audio buffer on failed save; no FFmpeg panics/zombies | passed |
+| U3 | `stop-keeps-transcript-and-duration` | 14, 15, 25 | Second stop ignored; timeout keeps model; duration kept (incl. paused) | passed (remaining notes in PR text) |
+| U4 | `no-model-swap-while-recording` | 16 | Recording / retranscribe / import can't run together | passed |
+| U5 | `whisper-filler-filter` | 17 | Filler filter no longer drops real speech | passed (pre-existing repetition rule noted) |
+| U6 | `whisper-part-download` | 18 | Download to `.part`, installed model kept on failure | see note A |
+| U7 | `delete-meeting-folder` | 19 | Deleting a meeting removes its folder (safely) | passed (3 rounds) |
+| U8 | `search-snippet-utf8` | 20 | Search snippet can't crash on non-ASCII | see note A |
+| U9 | `openrouter-async` | 21 | OpenRouter list no longer freezes the UI | passed |
+| U10 | `recording-controls-listeners` | 22, 23 | Listener leak; chunk error no longer stops the UI | passed |
+| U11 | `onboarding-settings-pane` | 24 | Onboarding "Open settings" works (Mac pane to confirm) | passed; Mac check needed |
+| U12 | `vad-max-segment` | 26 | Speech segments split every 30 s (related #756) | see note A |
+| U13 | `error-text` | 28 | Real error text instead of "Unknown error" | passed |
+| U14 | `command-hardening` | 29 | Unused file-writer removed; https-only links | passed |
+| U15 | `retranscription-memory` | 3 | No full copy of the recording in memory | passed |
+
+Note A: STATUS_A_PLACEHOLDER
+
+Several branches have more than one commit (review rounds); squash on merge.
+The PR body for each is in `docs/handoff/upstream/<branch>.md`.
 
 Merge conflicts between these branches (checked by merging all into
 `upstream/devtest`): `audio-errors-keep-recording` conflicts with
