@@ -46,6 +46,8 @@ struct DownloadStateTestHook {
     continue_cancellation: tokio::sync::Notify,
     discovery_active_lock_acquired: tokio::sync::Notify,
     continue_discovery: tokio::sync::Notify,
+    rename_reached: tokio::sync::Notify,
+    continue_rename: tokio::sync::Notify,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -205,6 +207,48 @@ impl WhisperEngine {
             .clone()
     }
     
+    /// Status of the model file at `model_path` as discovery reports it (size and GGML header).
+    async fn disk_model_status(&self, model_path: &Path, size_mb: u32) -> ModelStatus {
+        let filename = model_path.file_name().unwrap_or_default().to_string_lossy();
+        if model_path.exists() {
+            // Check if file size is reasonable (at least 1MB for a valid model)
+            match std::fs::metadata(model_path) {
+                Ok(metadata) => {
+                    let file_size_bytes = metadata.len();
+                    let file_size_mb = file_size_bytes / (1024 * 1024);
+                    let expected_min_size_mb = (size_mb as f64 * 0.9) as u64; // Allow 90% of expected size as minimum for more accurate corruption detection
+
+                    if file_size_mb >= expected_min_size_mb && file_size_mb > 1 {
+                        // File size looks good, but let's also check if it's a valid GGML file
+                        match self.validate_model_file(&model_path.to_path_buf()).await {
+                            Ok(_) => ModelStatus::Available,
+                            Err(_) => {
+                                log::warn!("Model file {} has correct size but appears corrupted (failed validation)",
+                                         filename);
+                                ModelStatus::Corrupted {
+                                    file_size: file_size_bytes,
+                                    expected_min_size: (expected_min_size_mb * 1024 * 1024) as u64
+                                }
+                            }
+                        }
+                    } else if file_size_mb > 0 {
+                        log::warn!("Model file {} exists but is corrupted ({} MB, expected ~{} MB)",
+                                 filename, file_size_mb, size_mb);
+                        ModelStatus::Corrupted {
+                            file_size: file_size_bytes,
+                            expected_min_size: (expected_min_size_mb * 1024 * 1024) as u64
+                        }
+                    } else {
+                        ModelStatus::Missing
+                    }
+                }
+                Err(_) => ModelStatus::Missing
+            }
+        } else {
+            ModelStatus::Missing
+        }
+    }
+
     pub async fn discover_models(&self) -> Result<Vec<ModelInfo>> {
         let models_dir = &self.models_dir;
         let mut models = Vec::new();
@@ -213,43 +257,7 @@ impl WhisperEngine {
 
         for &(name, filename, size_mb, accuracy, speed, description) in model_configs {
             let model_path = models_dir.join(filename);
-            let status = if model_path.exists() {
-                // Check if file size is reasonable (at least 1MB for a valid model)
-                match std::fs::metadata(&model_path) {
-                    Ok(metadata) => {
-                        let file_size_bytes = metadata.len();
-                        let file_size_mb = file_size_bytes / (1024 * 1024);
-                        let expected_min_size_mb = (size_mb as f64 * 0.9) as u64; // Allow 90% of expected size as minimum for more accurate corruption detection
-
-                        if file_size_mb >= expected_min_size_mb && file_size_mb > 1 {
-                            // File size looks good, but let's also check if it's a valid GGML file
-                            match self.validate_model_file(&model_path).await {
-                                Ok(_) => ModelStatus::Available,
-                                Err(_) => {
-                                    log::warn!("Model file {} has correct size but appears corrupted (failed validation)",
-                                             filename);
-                                    ModelStatus::Corrupted {
-                                        file_size: file_size_bytes,
-                                        expected_min_size: (expected_min_size_mb * 1024 * 1024) as u64
-                                    }
-                                }
-                            }
-                        } else if file_size_mb > 0 {
-                            log::warn!("Model file {} exists but is corrupted ({} MB, expected ~{} MB)",
-                                     filename, file_size_mb, size_mb);
-                            ModelStatus::Corrupted {
-                                file_size: file_size_bytes,
-                                expected_min_size: (expected_min_size_mb * 1024 * 1024) as u64
-                            }
-                        } else {
-                            ModelStatus::Missing
-                        }
-                    }
-                    Err(_) => ModelStatus::Missing
-                }
-            } else {
-                ModelStatus::Missing
-            };
+            let status = self.disk_model_status(&model_path, size_mb).await;
             
             let model_info = ModelInfo {
                 name: name.to_string(),
@@ -269,6 +277,11 @@ impl WhisperEngine {
         if let Some(hook) = self.test_hook() {
             hook.discovery_active_lock_acquired.notify_one();
             hook.continue_discovery.notified().await;
+        }
+        for model in &models {
+            if !active_downloads.contains_key(&model.name) {
+                Self::remove_stale_partial_download(&model.path).await;
+            }
         }
         let mut available_models = self.available_models.write().await;
         for model in &mut models {
@@ -897,7 +910,15 @@ impl WhisperEngine {
                 };
             }
 
-            if result.is_ok() {
+            #[cfg(test)]
+            if let Some(hook) = self.test_hook() {
+                hook.rename_reached.notify_one();
+                hook.continue_rename.notified().await;
+            }
+
+            if result.is_ok() && active_download.cancellation.is_cancelled() {
+                result = Err(DownloadCancelled.into());
+            } else if result.is_ok() {
                 result = fs::rename(&part_path, file_path)
                     .await
                     .map_err(|e| anyhow!("Downloaded model could not be installed: {}", e));
@@ -911,6 +932,15 @@ impl WhisperEngine {
                 log::info!("Cleaned up failed download file: {}", part_path.display());
             }
         }
+
+        // Status of whatever is at the final path now: the new model, or a previously kept file.
+        let disk_status = match WHISPER_MODEL_CATALOG
+            .iter()
+            .find(|model| model.0 == model_name)
+        {
+            Some(model) => self.disk_model_status(file_path, model.2).await,
+            None => ModelStatus::Missing,
+        };
 
         let (released_active_owner, cancellation_won) = {
             let mut active_downloads = self.active_downloads.lock().await;
@@ -955,7 +985,7 @@ impl WhisperEngine {
                 match active_downloads.get(model_name) {
                     Some(current) if Arc::ptr_eq(current, active_download) => {
                         if let Some(model_info) = models.get_mut(model_name) {
-                            model_info.status = ModelStatus::Missing;
+                            model_info.status = disk_status;
                         }
                         active_downloads.remove(model_name);
                         true
@@ -973,7 +1003,7 @@ impl WhisperEngine {
                     model_info.status = ModelStatus::Available;
                     model_info.path = file_path.clone();
                 } else {
-                    model_info.status = ModelStatus::Missing;
+                    model_info.status = disk_status;
                 }
             }
         }
@@ -1261,6 +1291,7 @@ mod tests {
     async fn finish_download_publishes_available_after_releasing_active_owner() {
         let dir = tempfile::tempdir().unwrap();
         let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        engine.discover_models().await.unwrap();
         let model_path = dir.path().join("ggml-tiny.bin");
         let part_path = partial_download_path(&model_path);
 
@@ -1272,7 +1303,6 @@ mod tests {
             .set_len(68 * 1024 * 1024)
             .unwrap();
 
-        engine.discover_models().await.unwrap();
         let active_download = engine.reserve_active_download("tiny").await.unwrap();
         let active_models = engine.discover_models().await.unwrap();
         assert!(matches!(
@@ -1310,11 +1340,11 @@ mod tests {
     async fn finish_download_rejects_invalid_header_and_cleans_file() {
         let dir = tempfile::tempdir().unwrap();
         let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        engine.discover_models().await.unwrap();
         let model_path = dir.path().join("ggml-tiny.bin");
         let part_path = partial_download_path(&model_path);
         std::fs::write(&part_path, b"not-a-model").unwrap();
 
-        engine.discover_models().await.unwrap();
         let active_download = engine.reserve_active_download("tiny").await.unwrap();
         let error = engine
             .finish_download("tiny", &active_download, &model_path, Ok(()))
@@ -1371,6 +1401,8 @@ mod tests {
             continue_cancellation: tokio::sync::Notify::new(),
             discovery_active_lock_acquired: tokio::sync::Notify::new(),
             continue_discovery: tokio::sync::Notify::new(),
+            rename_reached: tokio::sync::Notify::new(),
+            continue_rename: tokio::sync::Notify::new(),
         });
         *engine.download_state_test_hook.lock().unwrap() = Some(Arc::clone(&hook));
 
@@ -1457,6 +1489,7 @@ mod tests {
     async fn late_cancellation_preserves_a_completed_model_state() {
         let dir = tempfile::tempdir().unwrap();
         let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        engine.discover_models().await.unwrap();
         let model_path = dir.path().join("ggml-tiny.bin");
         let part_path = partial_download_path(&model_path);
 
@@ -1468,7 +1501,6 @@ mod tests {
             .set_len(68 * 1024 * 1024)
             .unwrap();
 
-        engine.discover_models().await.unwrap();
         let active_download = engine.reserve_active_download("tiny").await.unwrap();
         engine
             .finish_download("tiny", &active_download, &model_path, Ok(()))
@@ -1779,6 +1811,7 @@ mod tests {
     async fn finish_download_replaces_a_pre_existing_corrupted_model() {
         let dir = tempfile::tempdir().unwrap();
         let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        engine.discover_models().await.unwrap();
         let model_path = dir.path().join("ggml-tiny.bin");
         let part_path = partial_download_path(&model_path);
         std::fs::write(&model_path, vec![0_u8; 2 * 1024 * 1024]).unwrap();
@@ -1790,7 +1823,6 @@ mod tests {
             .set_len(68 * 1024 * 1024)
             .unwrap();
 
-        engine.discover_models().await.unwrap();
         let active_download = engine.reserve_active_download("tiny").await.unwrap();
         engine
             .finish_download("tiny", &active_download, &model_path, Ok(()))
@@ -1809,6 +1841,7 @@ mod tests {
     async fn failed_download_keeps_a_pre_existing_installed_model() {
         let dir = tempfile::tempdir().unwrap();
         let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        engine.discover_models().await.unwrap();
         let model_path = dir.path().join("ggml-tiny.bin");
         let part_path = partial_download_path(&model_path);
         std::fs::write(&model_path, b"ggml\0\0\0\0").unwrap();
@@ -1820,7 +1853,6 @@ mod tests {
             .unwrap();
         std::fs::write(&part_path, b"not-a-model").unwrap();
 
-        engine.discover_models().await.unwrap();
         let active_download = engine.reserve_active_download("tiny").await.unwrap();
         assert!(engine
             .finish_download("tiny", &active_download, &model_path, Ok(()))
@@ -1829,6 +1861,16 @@ mod tests {
 
         assert!(!part_path.exists());
         assert!(model_path.exists());
+        assert!(matches!(
+            engine
+                .available_models
+                .read()
+                .await
+                .get("tiny")
+                .expect("tiny should remain cached")
+                .status,
+            ModelStatus::Available
+        ));
         assert!(matches!(
             tiny_model(&engine.discover_models().await.unwrap()).status,
             ModelStatus::Available
@@ -1842,12 +1884,99 @@ mod tests {
         let model_path = dir.path().join("ggml-tiny.bin");
         let part_path = partial_download_path(&model_path);
         std::fs::write(&model_path, vec![0_u8; 2 * 1024 * 1024]).unwrap();
+        engine.discover_models().await.unwrap();
         std::fs::write(&part_path, b"ggml").unwrap();
 
-        engine.discover_models().await.unwrap();
         engine.delete_model("tiny").await.unwrap();
 
         assert!(!model_path.exists());
         assert!(!part_path.exists());
+    }
+
+    #[tokio::test]
+    async fn discover_models_removes_a_stale_partial_download_without_an_active_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        let part_path = partial_download_path(&dir.path().join("ggml-tiny.bin"));
+        std::fs::write(&part_path, b"ggml").unwrap();
+
+        let _active_download = engine.reserve_active_download("tiny").await.unwrap();
+        engine.discover_models().await.unwrap();
+        assert!(
+            part_path.exists(),
+            "an active download's .part must be left alone"
+        );
+
+        engine.active_downloads.lock().await.remove("tiny");
+        let models = engine.discover_models().await.unwrap();
+        assert!(!part_path.exists());
+        assert!(matches!(tiny_model(&models).status, ModelStatus::Missing));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_finalization_keeps_the_existing_model_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine =
+            Arc::new(WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap());
+        engine.discover_models().await.unwrap();
+        let model_path = dir.path().join("ggml-tiny.bin");
+        let part_path = partial_download_path(&model_path);
+        std::fs::write(&model_path, vec![0_u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&part_path, b"ggml\0\0\0\0").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&part_path)
+            .unwrap()
+            .set_len(68 * 1024 * 1024)
+            .unwrap();
+
+        let hook = Arc::new(DownloadStateTestHook {
+            cancellation_first_lock_acquired: tokio::sync::Notify::new(),
+            continue_cancellation: tokio::sync::Notify::new(),
+            discovery_active_lock_acquired: tokio::sync::Notify::new(),
+            continue_discovery: tokio::sync::Notify::new(),
+            rename_reached: tokio::sync::Notify::new(),
+            continue_rename: tokio::sync::Notify::new(),
+        });
+        *engine.download_state_test_hook.lock().unwrap() = Some(Arc::clone(&hook));
+
+        let active_download = engine.reserve_active_download("tiny").await.unwrap();
+        let finalization_engine = Arc::clone(&engine);
+        let finalization_owner = Arc::clone(&active_download);
+        let finalization_path = model_path.clone();
+        let finalization = tokio::spawn(async move {
+            finalization_engine
+                .finish_download("tiny", &finalization_owner, &finalization_path, Ok(()))
+                .await
+        });
+
+        timeout(Duration::from_secs(1), hook.rename_reached.notified())
+            .await
+            .expect("finalization should reach the rename step");
+        active_download.cancellation.cancel();
+        hook.continue_rename.notify_one();
+        hook.continue_cancellation.notify_one();
+
+        let error = timeout(Duration::from_secs(1), finalization)
+            .await
+            .expect("cancelled finalization should complete")
+            .unwrap()
+            .unwrap_err();
+        assert!(is_download_cancelled(&error));
+        assert!(!part_path.exists());
+        assert_eq!(
+            std::fs::metadata(&model_path).unwrap().len(),
+            2 * 1024 * 1024
+        );
+        assert!(matches!(
+            engine
+                .available_models
+                .read()
+                .await
+                .get("tiny")
+                .expect("tiny should remain cached")
+                .status,
+            ModelStatus::Corrupted { .. }
+        ));
     }
 }
