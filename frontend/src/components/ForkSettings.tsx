@@ -24,10 +24,24 @@ export function ForkSettings() {
     invoke<ForkSettingsData>('get_fork_settings')
       .then(setSettings)
       .catch((error) => toast.error('Could not load settings', { description: String(error) }));
-    invoke<string | null>('teams_prompt_unavailable')
-      .then(setTeamsUnavailable)
-      .catch(() => setTeamsUnavailable(null));
   }, []);
+
+  // The detector sets up the pop-up asynchronously after the switch is
+  // turned on; poll its (cheap, in-memory) status while it is on.
+  const teamsEnabled = settings?.teams_prompt_enabled ?? false;
+  useEffect(() => {
+    if (!teamsEnabled) {
+      setTeamsUnavailable(null);
+      return;
+    }
+    const check = () =>
+      invoke<string | null>('teams_prompt_unavailable')
+        .then(setTeamsUnavailable)
+        .catch(() => setTeamsUnavailable(null));
+    check();
+    const timer = setInterval(check, 2000);
+    return () => clearInterval(timer);
+  }, [teamsEnabled]);
 
   if (!settings) return null;
 
@@ -35,15 +49,6 @@ export function ForkSettings() {
     try {
       await invoke('set_teams_prompt_enabled', { enabled });
       setSettings((current) => current && { ...current, teams_prompt_enabled: enabled });
-      setTeamsUnavailable(null);
-      // The pop-up is set up on the next detector poll; show its outcome.
-      if (enabled) {
-        setTimeout(() => {
-          invoke<string | null>('teams_prompt_unavailable')
-            .then(setTeamsUnavailable)
-            .catch(() => setTeamsUnavailable(null));
-        }, 2000);
-      }
     } catch (error) {
       toast.error('Could not save setting', { description: String(error) });
     }

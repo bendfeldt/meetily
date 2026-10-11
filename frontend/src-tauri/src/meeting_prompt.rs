@@ -24,23 +24,28 @@ const STATUS_WINDOW_LEVEL: i32 = 25;
 /// no extra window. Builds the window off the main thread (like a command
 /// would) and converts it to a panel on the main thread.
 pub async fn ensure<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    if app.get_webview_window(LABEL).is_some() {
+    if app.get_webview_panel(LABEL).is_ok() {
         return Ok(());
     }
-    let window =
-        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("meeting-prompt.html".into()))
-            .title("Teams meeting detected")
-            .inner_size(WIDTH, HEIGHT)
-            .resizable(false)
-            .decorations(false)
-            .transparent(true)
-            .skip_taskbar(true)
-            .always_on_top(true)
-            .visible(false)
-            .focused(false)
-            .accept_first_mouse(true)
-            .build()
-            .map_err(|e| format!("cannot create the pop-up window: {e}"))?;
+    // A window left by an earlier failed attempt is converted, not rebuilt.
+    let window = match app.get_webview_window(LABEL) {
+        Some(window) => window,
+        None => {
+            WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("meeting-prompt.html".into()))
+                .title("Teams meeting detected")
+                .inner_size(WIDTH, HEIGHT)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .skip_taskbar(true)
+                .always_on_top(true)
+                .visible(false)
+                .focused(false)
+                .accept_first_mouse(true)
+                .build()
+                .map_err(|e| format!("cannot create the pop-up window: {e}"))?
+        }
+    };
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
