@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::command;
-use reqwest::blocking::Client;
+use reqwest::Client;
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenRouterModel {
@@ -39,11 +40,13 @@ struct OpenRouterResponse {
 }
 
 #[command]
-pub fn get_openrouter_models() -> Result<Vec<OpenRouterModel>, String> {
+pub async fn get_openrouter_models() -> Result<Vec<OpenRouterModel>, String> {
     let client = Client::new();
     let response = client
         .get("https://openrouter.ai/api/v1/models")
+        .timeout(Duration::from_secs(5))
         .send()
+        .await
         .map_err(|e| format!("Failed to make HTTP request: {}", e))?;
 
     if !response.status().is_success() {
@@ -52,6 +55,7 @@ pub fn get_openrouter_models() -> Result<Vec<OpenRouterModel>, String> {
 
     let api_response: OpenRouterResponse = response
         .json()
+        .await
         .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
 
     let models = api_response
