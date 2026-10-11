@@ -1,0 +1,189 @@
+# Fork-only (bendfeldt/meetily): build the macOS app and .dmg (Apple Silicon),
+# smoke-test that the app launches, and publish the .dmg.
+#   - Manual run (Actions tab → "Fork - macOS DMG" → Run workflow): .dmg is
+#     uploaded as a workflow artifact.
+#   - Tag push `fork-v*` (e.g. fork-v0.4.1-1): also creates a GitHub Release
+#     in this fork with the .dmg attached.
+#   - Push that changes packaging files (below): build + smoke test only.
+# Builds are ad-hoc signed (no Apple Developer ID), so macOS asks for
+# confirmation on first open; see docs/BUILD_DMG.md. Fork builds use
+# tauri.fork.conf.json: no updater artifacts, and the updater points at this
+# fork's releases so the app never offers to replace itself with upstream.
+name: "Fork - macOS DMG"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build-type:
+        description: 'Build type'
+        type: choice
+        options: [release, debug]
+        default: release
+  push:
+    tags: ["fork-v*"]
+    # Also build when the packaging itself changes, so a broken .dmg build is
+    # caught on the branch that broke it.
+    branches: ["main", "enhance/**", "fix/**"]
+    paths:
+      - ".github/workflows/fork-macos-dmg.yml"
+      - "frontend/src-tauri/tauri.conf.json"
+      - "frontend/src-tauri/tauri.fork.conf.json"
+      - "frontend/src-tauri/entitlements.plist"
+      - "frontend/src-tauri/Info.plist"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  TARGET: aarch64-apple-darwin
+
+jobs:
+  dmg:
+    name: Build .dmg (macOS arm64)
+    runs-on: macos-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build settings
+        id: cfg
+        run: |
+          VERSION=$(grep -o '"version": "[^"]*"' frontend/src-tauri/tauri.conf.json | head -1 | cut -d'"' -f4)
+          if [ "${{ github.event.inputs.build-type }}" = "debug" ]; then
+            echo "profile=debug" >> "$GITHUB_OUTPUT"; echo "args=--debug" >> "$GITHUB_OUTPUT"
+          else
+            echo "profile=release" >> "$GITHUB_OUTPUT"; echo "args=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: fork-macos-dmg-${{ steps.cfg.outputs.profile }}
+
+      - name: Cache FFmpeg binary
+        uses: actions/cache@v4
+        with:
+          path: frontend/src-tauri/binaries/ffmpeg-*
+          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('frontend/src-tauri/build.rs', 'frontend/src-tauri/build/ffmpeg.rs') }}
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      # Same as upstream's build-macos.yml: the built-in summary model runs in
+      # this sidecar, bundled as an externalBin.
+      - name: Build llama-helper sidecar (Metal)
+        run: |
+          cargo build --release -p llama-helper --features metal
+          mkdir -p frontend/src-tauri/binaries
+          cp target/release/llama-helper "frontend/src-tauri/binaries/llama-helper-${TARGET}"
+
+      # beforeBuildCommand runs `pnpm build` (Next.js export) first.
+      - name: Build app and .dmg
+        working-directory: frontend
+        run: |
+          pnpm tauri build --target "${TARGET}" --bundles app,dmg \
+            --config "${GITHUB_WORKSPACE}/frontend/src-tauri/tauri.fork.conf.json" \
+            ${{ steps.cfg.outputs.args }}
+
+      - name: Locate bundle
+        id: out
+        run: |
+          B="target/${TARGET}/${{ steps.cfg.outputs.profile }}/bundle"
+          DMG=$(find "$B/dmg" -name '*.dmg' | head -1)
+          APP=$(find "$B/macos" -maxdepth 1 -name '*.app' | head -1)
+          test -n "$DMG" && test -n "$APP" || { echo "::error::no .dmg or .app produced"; find "$B" -maxdepth 2; exit 1; }
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+          ls -la "$B/dmg" "$B/macos"
+
+      # Verifies the bundle is complete and consistently (ad-hoc) signed, and
+      # that the sidecars and the Teams pop-up page made it into the app.
+      - name: Verify bundle contents and signature
+        run: |
+          APP="${{ steps.out.outputs.app }}"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          test -x "$APP/Contents/MacOS/meetily"
+          compgen -G "$APP/Contents/MacOS/ffmpeg*" > /dev/null || { echo "::error::ffmpeg sidecar missing"; exit 1; }
+          compgen -G "$APP/Contents/MacOS/llama-helper*" > /dev/null || { echo "::error::llama-helper sidecar missing"; exit 1; }
+          ls -la "$APP/Contents/MacOS/"
+          plutil -p "$APP/Contents/Info.plist" | grep -E 'CFBundleShortVersionString|NSMicrophoneUsageDescription|LSMinimumSystemVersion' || true
+          hdiutil verify "${{ steps.out.outputs.dmg }}"
+
+      # Launch the app from the mounted .dmg the way a user would and check it
+      # is still running after 30 s (catches missing dylibs, startup panics,
+      # DB migration crashes). No microphone or Teams on CI runners, so audio
+      # and the Teams pop-up are not exercised here.
+      - name: Smoke test - app starts and stays up
+        run: |
+          MNT=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "${{ steps.out.outputs.dmg }}"
+          APP_IN_DMG=$(find "$MNT" -maxdepth 1 -name '*.app' | head -1)
+          cp -R "$APP_IN_DMG" "$RUNNER_TEMP/"
+          hdiutil detach "$MNT"
+          BIN="$RUNNER_TEMP/$(basename "$APP_IN_DMG")/Contents/MacOS/meetily"
+          RUST_LOG=info "$BIN" > "$RUNNER_TEMP/app.log" 2>&1 &
+          PID=$!
+          sleep 30
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "App is running after 30 s"
+            kill "$PID" || true
+          else
+            CODE=0; wait "$PID" || CODE=$?
+            echo "::error::App exited within 30 s (exit code $CODE)"
+            tail -100 "$RUNNER_TEMP/app.log"
+            exit 1
+          fi
+          echo "--- last log lines ---"; tail -40 "$RUNNER_TEMP/app.log"
+
+      - name: Upload .dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: meetily-fork-${{ steps.cfg.outputs.version }}-${{ steps.cfg.outputs.sha }}-macos-arm64-${{ steps.cfg.outputs.profile }}
+          path: ${{ steps.out.outputs.dmg }}
+          retention-days: 30
+
+      - name: Publish GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/fork-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" "${{ steps.out.outputs.dmg }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "meetily fork ${GITHUB_REF_NAME#fork-v}" \
+            --notes "Fork build of ${{ steps.cfg.outputs.sha }} (Apple Silicon, ad-hoc signed). Install: see docs/BUILD_DMG.md."
+
+      - name: Summary
+        run: |
+          {
+            echo "## macOS .dmg"
+            echo "| | |"; echo "|---|---|"
+            echo "| Version | ${{ steps.cfg.outputs.version }} (${{ steps.cfg.outputs.sha }}) |"
+            echo "| Profile | ${{ steps.cfg.outputs.profile }} |"
+            echo "| File | $(basename "${{ steps.out.outputs.dmg }}") |"
+            echo "| Signed | ad-hoc (not notarized) |"
+          } >> "$GITHUB_STEP_SUMMARY"

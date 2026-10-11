@@ -1,0 +1,144 @@
+# Fork-only (bendfeldt/meetily): verify every change before it is merged.
+# Upstream's workflows are manual-only, so this is the fork's real gate.
+#   - ui:        TypeScript types, frontend unit tests, and the Next.js export
+#                build that the desktop app bundles.
+#   - rust-macos: compile, lint (report-only) and unit-test the Rust core on
+#                macOS, the only place #[cfg(target_os = "macos")] code
+#                (Teams detector, NSPanel pop-up, CoreAudio) is compiled.
+# The full app + .dmg build is in fork-macos-dmg.yml (slower, on demand).
+name: "Fork - CI"
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: ["main", "enhance/**", "fix/**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      ui: ${{ steps.filter.outputs.ui }}
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            ui:
+              - 'frontend/src/**'
+              - 'frontend/tests/**'
+              - 'frontend/public/**'
+              - 'frontend/package.json'
+              - 'frontend/pnpm-lock.yaml'
+              - 'frontend/*.config.*'
+              - 'frontend/tsconfig.json'
+              - '.claude/scripts/frontend-tests.sh'
+              - '.github/workflows/fork-ci.yml'
+            rust:
+              - 'frontend/src-tauri/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/fork-ci.yml'
+
+  ui:
+    name: UI - types, tests, export build
+    needs: changes
+    if: needs.changes.outputs.ui == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript
+        working-directory: frontend
+        run: pnpm exec tsc --noEmit
+
+      # One Bun process per test file (see the script for why).
+      - name: Frontend tests
+        run: .claude/scripts/frontend-tests.sh
+
+      - name: Next.js export build (what the app bundles)
+        working-directory: frontend
+        run: pnpm build
+
+  rust-macos:
+    name: Rust - check / clippy / test (macOS arm64)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: fork-macos-rust-checks
+
+      # tauri-build only checks that these paths exist; the real artifacts are
+      # produced by fork-macos-dmg.yml. build.rs downloads FFmpeg itself.
+      - name: Placeholders for frontendDist and the llama-helper sidecar
+        run: |
+          mkdir -p frontend/out frontend/src-tauri/binaries
+          touch frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+          chmod +x frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+
+      - name: cargo check
+        run: cargo check -p meetily --all-targets
+
+      # Report-only: upstream code has existing warnings. Review new warnings
+      # in changed files from the log.
+      - name: cargo clippy
+        run: cargo clippy -p meetily --all-targets
+        continue-on-error: true
+
+      - name: cargo test
+        run: cargo test -p meetily
+
+  # One required check for branch protection, whatever was skipped above.
+  ci-ok:
+    name: Fork CI result
+    if: always()
+    needs: [ui, rust-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any job failed or was cancelled
+        run: |
+          echo "ui=${{ needs.ui.result }} rust-macos=${{ needs.rust-macos.result }}"
+          for r in "${{ needs.ui.result }}" "${{ needs.rust-macos.result }}"; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then exit 1; fi
+          done
