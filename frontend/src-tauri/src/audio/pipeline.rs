@@ -634,15 +634,7 @@ impl AudioCapture {
             }
 
             warn!("Failed to send audio chunk: {}", e);
-            // More specific error handling based on failure reason
-            let error = if e.to_string().contains("channel closed") {
-                AudioError::ChannelClosed
-            } else if e.to_string().contains("full") {
-                AudioError::BufferOverflow
-            } else {
-                AudioError::ProcessingFailed
-            };
-            self.state.report_error(error);
+            self.state.report_error(send_error_kind(&e));
         } else {
             debug!("Sent audio chunk {} ({} samples)", chunk_id, data.len());
         }
@@ -676,6 +668,20 @@ impl AudioCapture {
         };
 
         self.state.report_error(audio_error);
+    }
+}
+
+/// Map a `send_audio_chunk` failure to an `AudioError`. The channel is
+/// unbounded, so a send only fails when the pipeline task dropped its
+/// receiver: that is a dead pipeline, not a transient error.
+fn send_error_kind(e: &anyhow::Error) -> AudioError {
+    let message = e.to_string();
+    if message.contains("channel closed") || message.contains("Failed to send audio chunk") {
+        AudioError::ChannelClosed
+    } else if message.contains("full") {
+        AudioError::BufferOverflow
+    } else {
+        AudioError::ProcessingFailed
     }
 }
 
@@ -1134,6 +1140,31 @@ mod tests {
         assert_eq!(reset.vad_process_inference_failures, 0);
         assert_eq!(reset.vad_flush_invalid_data_failures, 0);
         assert_eq!(reset.vad_flush_inference_failures, 0);
+    }
+
+    #[test]
+    fn dead_pipeline_send_error_stops_recording() {
+        use super::{send_error_kind, AudioChunk, AudioError, DeviceType, RecordingState};
+
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        state.set_audio_sender(sender);
+        drop(receiver); // pipeline task exited
+
+        let chunk = AudioChunk {
+            data: vec![0.0; 4],
+            sample_rate: 48000,
+            timestamp: 0.0,
+            chunk_id: 1,
+            device_type: DeviceType::Microphone,
+        };
+        let err = state.send_audio_chunk(chunk).unwrap_err();
+        let kind = send_error_kind(&err);
+        assert!(matches!(kind, AudioError::ChannelClosed));
+
+        state.report_error(kind);
+        assert!(!state.is_recording());
     }
 }
 

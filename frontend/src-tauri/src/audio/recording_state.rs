@@ -266,8 +266,9 @@ impl RecordingState {
     pub fn report_error(&self, error: AudioError) {
         let count = self.error_count.fetch_add(1, Ordering::SeqCst) + 1;
 
-        // Only log and notify when the error kind changes: a dead stream can
-        // fail on every audio callback, and we no longer stop on a count.
+        // Log and notify only when the kind differs from the previous error
+        // (A, B, A notifies three times): a failing stream can report on every
+        // audio callback, and we no longer stop on a count.
         let mut last_error = self.last_error.lock().unwrap();
         let is_new = last_error.as_ref().map_or(true, |last| {
             std::mem::discriminant(last) != std::mem::discriminant(&error)
@@ -281,7 +282,9 @@ impl RecordingState {
             // disconnects, and stopping here left the UI showing a live
             // recording that captured nothing.
             let recoverable_count = self.recoverable_error_count.fetch_add(1, Ordering::SeqCst) + 1;
-            if is_new {
+            // Every 100th recoverable error is logged too, so a sustained
+            // failure stays visible.
+            if is_new || recoverable_count % 100 == 0 {
                 log::warn!(
                     "Recoverable audio error ({} of {} total): {:?}",
                     recoverable_count,
@@ -443,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_error_notifies_once_per_kind() {
+    fn notifies_only_when_error_kind_changes_and_counts_repeats() {
         let state = RecordingState::new();
         state.start_recording().unwrap();
         let calls = Arc::new(AtomicU32::new(0));
@@ -455,8 +458,14 @@ mod tests {
         for _ in 0..5 {
             state.report_error(AudioError::ProcessingFailed);
         }
-        state.report_error(AudioError::StreamFailed);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // A, B, A: each change of kind notifies again.
+        state.report_error(AudioError::StreamFailed);
+        state.report_error(AudioError::ProcessingFailed);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        assert_eq!(state.get_error_count(), 7);
+        assert_eq!(state.get_recoverable_error_count(), 7);
     }
 }
