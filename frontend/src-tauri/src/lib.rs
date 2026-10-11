@@ -518,18 +518,28 @@ pub fn run() {
                 log::error!("Failed to create system tray: {}", e);
             }
 
-            // Fork-only (bendfeldt/meetily): Teams meeting detection. The
-            // pop-up panel is created only once the setting is switched on.
+            // Fork-only (bendfeldt/meetily): Teams meeting pop-up. Without the
+            // panel the detector does not run (no silent substitute).
             #[cfg(target_os = "macos")]
             {
+                use tauri_plugin_notification::NotificationExt;
                 let handle = _app.handle();
-                match handle.plugin(tauri_nspanel::init()) {
+                let ready = handle
+                    .plugin(tauri_nspanel::init())
+                    .and_then(|_| meeting_prompt::create(handle));
+                match ready {
                     Ok(()) => meeting_detector::start(handle.clone()),
                     Err(e) => {
                         log::error!("Teams meeting pop-up unavailable: {}", e);
-                        meeting_detector::set_unavailable(&format!(
-                            "The pop-up could not be set up: {e}"
-                        ));
+                        if let Err(e) = handle
+                            .notification()
+                            .builder()
+                            .title("meetily")
+                            .body("The Teams meeting pop-up could not start; see the log.")
+                            .show()
+                        {
+                            log::error!("Cannot show notification: {}", e);
+                        }
                     }
                 }
             }
@@ -793,7 +803,6 @@ pub fn run() {
             fork_settings::get_fork_settings,
             fork_settings::set_teams_prompt_enabled,
             meeting_detector::meeting_prompt_respond,
-            meeting_detector::teams_prompt_unavailable,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
             audio::recording_preferences::get_default_recordings_folder_path,

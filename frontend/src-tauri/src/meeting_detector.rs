@@ -223,9 +223,8 @@ mod probe {
             Err(e) => {
                 // CoreAudio process objects need macOS 14+.
                 if !WARNED.swap(true, Ordering::Relaxed) {
-                    log::warn!("meeting_detector: cannot list audio processes ({e:?}); Teams detection is unavailable");
+                    log::warn!("meeting_detector: cannot list audio processes ({e:?}); Teams detection needs macOS 14+");
                 }
-                super::set_unavailable("Teams detection needs macOS 14 or later.");
                 Vec::new()
             }
         }
@@ -238,29 +237,6 @@ pub use runner::start;
 /// Clicks from the pop-up: Record (true) or Not now (false).
 static UI: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<bool>> =
     std::sync::OnceLock::new();
-
-/// Why the Teams pop-up cannot work on this Mac, shown in Settings.
-static UNAVAILABLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn set_unavailable(reason: &str) {
-    if let Ok(mut slot) = UNAVAILABLE.lock() {
-        slot.get_or_insert_with(|| reason.to_string());
-    }
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn clear_unavailable() {
-    if let Ok(mut slot) = UNAVAILABLE.lock() {
-        *slot = None;
-    }
-}
-
-/// `None` while the Teams pop-up works (or has not been tried yet).
-#[tauri::command]
-pub fn teams_prompt_unavailable() -> Option<String> {
-    UNAVAILABLE.lock().ok().and_then(|slot| slot.clone())
-}
 
 /// The pop-up's buttons. A no-op where the detector does not run.
 #[tauri::command]
@@ -376,32 +352,11 @@ mod runner {
             let mut detector = Detector::default();
             let mut interval = tokio::time::interval(POLL);
             let mut was_enabled = false;
-            let mut panel_ready = false;
-            let mut panel_failed = false;
-            let mut setting_was_on = false;
             let mut last_holders: Vec<String> = Vec::new();
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let mut enabled = crate::fork_settings::load(&app).teams_prompt_enabled;
-                        if enabled && !setting_was_on {
-                            // Switched on: retry a failed panel, re-check the probe.
-                            panel_failed = false;
-                            clear_unavailable();
-                        }
-                        setting_was_on = enabled;
-                        if enabled && !panel_ready && !panel_failed {
-                            match crate::meeting_prompt::ensure(&app).await {
-                                Ok(()) => panel_ready = true,
-                                Err(e) => {
-                                    panel_failed = true;
-                                    log::error!("meeting_detector: Teams pop-up unavailable: {e}");
-                                    set_unavailable(&format!("The pop-up could not be created: {e}"));
-                                }
-                            }
-                        }
-                        // No silent substitute without the pop-up.
-                        enabled &= panel_ready;
+                        let enabled = crate::fork_settings::load(&app).teams_prompt_enabled;
                         if !enabled {
                             if was_enabled {
                                 let actions = detector.feature_off();

@@ -18,30 +18,12 @@ interface ForkSettingsData {
 export function ForkSettings() {
   const platform = usePlatform();
   const [settings, setSettings] = useState<ForkSettingsData | null>(null);
-  const [teamsUnavailable, setTeamsUnavailable] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<ForkSettingsData>('get_fork_settings')
       .then(setSettings)
       .catch((error) => toast.error('Could not load settings', { description: String(error) }));
   }, []);
-
-  // The detector sets up the pop-up asynchronously after the switch is
-  // turned on; poll its (cheap, in-memory) status while it is on.
-  const teamsEnabled = settings?.teams_prompt_enabled ?? false;
-  useEffect(() => {
-    if (!teamsEnabled) {
-      setTeamsUnavailable(null);
-      return;
-    }
-    const check = () =>
-      invoke<string | null>('teams_prompt_unavailable')
-        .then(setTeamsUnavailable)
-        .catch(() => setTeamsUnavailable(null));
-    check();
-    const timer = setInterval(check, 2000);
-    return () => clearInterval(timer);
-  }, [teamsEnabled]);
 
   if (!settings) return null;
 
@@ -74,11 +56,6 @@ export function ForkSettings() {
               Recordings started from it stop when Teams releases the microphone. Recording other
               people may require telling them.
             </div>
-            {teamsUnavailable && (
-              <div className="text-sm text-amber-700 mt-1" role="status">
-                Unavailable: {teamsUnavailable}
-              </div>
-            )}
           </div>
           <Switch
             aria-labelledby="teams-prompt-label"

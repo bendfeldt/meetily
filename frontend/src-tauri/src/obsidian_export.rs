@@ -7,7 +7,6 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Local};
 use serde_json::Value;
@@ -28,7 +27,6 @@ const FRONTMATTER_SCAN_BYTES: u64 = 512;
 /// Serializes note writes so a summary save and a summary completion for the
 /// same meeting cannot interleave.
 static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct Segment {
     pub start: Option<f64>,
@@ -92,92 +90,15 @@ fn timestamp(seconds: f64) -> String {
     )
 }
 
-/// Shift ATX headings one level down (max 6) so they sit under `## Summary`.
-fn demote_headings(markdown: &str) -> String {
-    let mut fence: Option<&str> = None;
-    markdown
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            for marker in ["```", "~~~"] {
-                if trimmed.starts_with(marker) {
-                    fence = match fence {
-                        None => Some(marker),
-                        // A closing fence carries no info string.
-                        Some(open)
-                            if open == marker
-                                && trimmed.trim_end().trim_start_matches(marker).is_empty() =>
-                        {
-                            None
-                        }
-                        open => open,
-                    };
-                }
-            }
-            let level = line.chars().take_while(|c| *c == '#').count();
-            let is_heading = (1..6).contains(&level) && line[level..].starts_with([' ', '\t']);
-            if fence.is_none() && is_heading {
-                format!("#{line}")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Markdown for a stored summary (`summary_processes.result`): the `markdown`
-/// field of current summaries, or the sections of legacy ones in
-/// `_section_order`.
+/// Markdown of a stored summary (`summary_processes.result`), from its
+/// `markdown` field.
+// shortcut: summaries without `markdown` (legacy sections, BlockNote-only) are skipped, convert them if old meetings need exporting
 pub fn summary_markdown(summary: &Value) -> Option<String> {
-    if let Some(markdown) = summary.get("markdown").and_then(Value::as_str) {
-        // Same cleaning as the meeting page: strips model reasoning envelopes.
-        let cleaned = crate::summary::processor::clean_llm_markdown_detailed(markdown).markdown;
-        let markdown = cleaned.trim();
-        return (!markdown.is_empty()).then(|| demote_headings(markdown));
-    }
-    // shortcut: BlockNote-only summaries (summary_json without markdown) are skipped, convert blocks if that shows up
-    let sections = summary.as_object()?;
-    let ordered: Vec<&String> = match summary.get("_section_order").and_then(Value::as_array) {
-        Some(order) => order
-            .iter()
-            .filter_map(Value::as_str)
-            .filter_map(|k| sections.get_key_value(k).map(|(k, _)| k))
-            .collect(),
-        None => sections.keys().collect(),
-    };
-    let mut out = Vec::new();
-    for key in ordered {
-        if key == "MeetingName" || key == "_section_order" {
-            continue;
-        }
-        let section = &sections[key];
-        let blocks: Vec<&str> = section
-            .get("blocks")
-            .and_then(Value::as_array)
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| b.get("content").and_then(Value::as_str))
-                    .map(str::trim)
-                    .filter(|c| !c.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if blocks.is_empty() {
-            continue;
-        }
-        let heading = section.get("title").and_then(Value::as_str).unwrap_or(key);
-        out.push(format!(
-            "### {heading}\n\n{}",
-            blocks
-                .iter()
-                .map(|b| format!("- {b}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    (!out.is_empty()).then(|| out.join("\n\n"))
+    let markdown = summary.get("markdown").and_then(Value::as_str)?;
+    // Same cleaning as the meeting page: strips model reasoning envelopes.
+    let cleaned = crate::summary::processor::clean_llm_markdown_detailed(markdown).markdown;
+    let markdown = cleaned.trim();
+    (!markdown.is_empty()).then(|| markdown.to_string())
 }
 
 pub fn render_markdown(note: &NoteInput) -> String {
@@ -285,11 +206,8 @@ pub fn write_note(
         target = dir.join(format!("{stem} ({n}).md"));
         n += 1;
     }
-    let temp = dir.join(format!(
-        ".meetily-note-{}-{}.tmp",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
+    // WRITE_LOCK serializes writes and the app is single-instance.
+    let temp = dir.join(".meetily-note.tmp");
     let written = std::fs::write(&temp, content).and_then(|_| std::fs::rename(&temp, &target));
     if let Err(e) = written {
         let _ = std::fs::remove_file(&temp);
@@ -378,6 +296,10 @@ pub fn spawn_sync_if_exported<R: Runtime>(app: AppHandle<R>, pool: SqlitePool, m
         let Some(dir) = fork_settings::load(&app).obsidian_export_folder else {
             return;
         };
+        if !dir.is_dir() {
+            log::warn!("obsidian_export: export folder is missing, notes are not synced");
+            return;
+        }
         if let Err(e) = export_to(&dir, &pool, &meeting_id, true).await {
             log::warn!("obsidian_export: sync failed for {meeting_id}: {e}");
         }
@@ -405,41 +327,38 @@ async fn pick_folder<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
 pub async fn choose_obsidian_export_folder<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<Option<String>, String> {
-    let Some(dir) = pick_folder(&app).await else {
-        return Ok(None);
-    };
-    let mut settings = fork_settings::load(&app);
-    settings.obsidian_export_folder = Some(dir.clone());
-    fork_settings::save(&app, &settings).map_err(|e| e.to_string())?;
-    Ok(Some(dir.to_string_lossy().into_owned()))
+    Ok(choose_folder(&app)
+        .await?
+        .map(|dir| dir.to_string_lossy().into_owned()))
 }
 
-/// Export a meeting note. Asks for the export folder when none is set or when
-/// `choose_folder` is true. Choosing a new folder starts fresh there: notes in
-/// the old folder stay but are no longer synced. Returns the note path, or `None` if the user
+/// Pick a folder and store it. Reloads the settings after the picker so a
+/// change made while it was open is kept.
+async fn choose_folder<R: Runtime>(app: &AppHandle<R>) -> Result<Option<PathBuf>, String> {
+    let Some(dir) = pick_folder(app).await else {
+        return Ok(None);
+    };
+    let mut settings = fork_settings::load(app);
+    settings.obsidian_export_folder = Some(dir.clone());
+    fork_settings::save(app, &settings).map_err(|e| e.to_string())?;
+    Ok(Some(dir))
+}
+
+/// Export a meeting note. Asks for the export folder when none is set (it is
+/// changed in Settings). Returns the note path, or `None` if the user
 /// cancelled the folder picker.
 #[tauri::command]
 pub async fn export_meeting_markdown<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
-    choose_folder: bool,
 ) -> Result<Option<String>, String> {
-    let dir = match fork_settings::load(&app)
-        .obsidian_export_folder
-        .filter(|_| !choose_folder)
-    {
+    let dir = match fork_settings::load(&app).obsidian_export_folder {
         Some(dir) => dir,
-        None => {
-            let Some(dir) = pick_folder(&app).await else {
-                return Ok(None);
-            };
-            // Reload: other settings may have changed while the picker was open.
-            let mut settings = fork_settings::load(&app);
-            settings.obsidian_export_folder = Some(dir.clone());
-            fork_settings::save(&app, &settings).map_err(|e| e.to_string())?;
-            dir
-        }
+        None => match choose_folder(&app).await? {
+            Some(dir) => dir,
+            None => return Ok(None),
+        },
     };
     export_to(&dir, state.db_manager.pool(), &meeting_id, false)
         .await
@@ -506,19 +425,17 @@ mod tests {
         ));
         assert!(md.contains("duration_min: 4\ntags: [meeting]\n---\n"));
         assert!(md.contains(
-            "## Summary\n\n## Notes\n#tag text\n###### Deep\n- a\n~~~\n# not a heading\n~~~\n"
+            "## Summary\n\n# Notes\n#tag text\n###### Deep\n- a\n~~~\n# not a heading\n~~~\n"
         ));
         assert!(md.contains("- **[00:00:12]** Hello\n- **[00:02:05]** Bye\n"));
         assert!(!md.contains("- \n"));
     }
 
     #[test]
-    fn fences_with_info_strings_and_titles_with_newlines() {
-        let md = demote_headings("```js\n```py\n# in code\n```\n# Out");
-        assert_eq!(md, "```js\n```py\n# in code\n```\n## Out");
+    fn titles_with_newlines_and_reasoning_envelopes() {
         assert!(render_markdown(&note("a\nb")).contains("\n# a b\n"));
         let think = summary_markdown(&json!({"markdown": "<think>secret</think>\n# Visible"}));
-        assert_eq!(think.as_deref(), Some("## Visible"));
+        assert_eq!(think.as_deref(), Some("# Visible"));
     }
 
     #[test]
@@ -529,18 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_summary_sections_follow_section_order() {
-        let legacy = json!({
-            "MeetingName": "x",
-            "_section_order": ["Zeta", "Alpha"],
-            "Alpha": {"title": "Alpha", "blocks": [{"content": "A"}]},
-            "Zeta": {"title": "Zeta", "blocks": [{"content": "Z"}, {"content": " "}]},
-            "Empty": {"blocks": []}
-        });
-        assert_eq!(
-            summary_markdown(&legacy).as_deref(),
-            Some("### Zeta\n\n- Z\n\n### Alpha\n\n- A")
-        );
+    fn legacy_summaries_are_skipped() {
+        let legacy = json!({"_section_order": ["A"], "A": {"blocks": [{"content": "x"}]}});
+        assert_eq!(summary_markdown(&legacy), None);
     }
 
     #[test]

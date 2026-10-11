@@ -55,8 +55,9 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   call). As built, differing from docs/plans/teams-auto-capture.md:
   - The pop-up is a static `public/meeting-prompt.html` + `.js`, not a Next
     page, so the app layout and providers do not load into it.
-  - The panel is created the first time the setting is on, so toggle-off
-    users get no extra window. It has its own `meeting-prompt` capability
+  - The panel is created at startup on macOS (one user, one Mac; ultra
+    review trim). If it fails, a notification says so and the detector
+    does not run. It has its own `meeting-prompt` capability
     (`core:default`, no plugin access). App commands stay callable from it,
     as from the main window: the app has no app manifest, so Tauri does not
     gate app commands for local pages.
@@ -69,9 +70,9 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
     another end grace (or another 4 h); notifies once. A stop error while
     no recording runs (stopped from the tray at the same moment) counts as
     stopped.
-  - Settings shows "Unavailable: …" when CoreAudio process listing fails
-    (macOS < 14) or the panel cannot be set up; switching the toggle off
-    and on retries.
+  - On macOS < 14 (no CoreAudio process listing) the detector logs once
+    and never prompts.
+  - A 4 h cap stop returns to Idle, so a call still running asks again.
   - The detector loop reads `fork_settings.json` every 0.5 s even when off
     (an in-memory store read; a broken store warns once).
 

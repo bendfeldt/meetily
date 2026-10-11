@@ -2,7 +2,7 @@
 
 // Fork-only (bendfeldt/meetily): opt-in export of this meeting to an Obsidian
 // note. Once exported, the Rust core keeps the note in sync with the summary
-// and title. Option/Alt-click chooses a different export folder.
+// and title. The export folder is changed in Settings.
 
 import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -13,10 +13,10 @@ import { Button } from '@/components/ui/button';
 export function ExportToObsidianButton({ meetingId }: { meetingId: string }) {
   const [isExporting, setIsExporting] = useState(false);
 
-  const handleExport = async (chooseFolder: boolean) => {
+  const handleExport = async () => {
     setIsExporting(true);
     try {
-      const path = await invoke<string | null>('export_meeting_markdown', { meetingId, chooseFolder });
+      const path = await invoke<string | null>('export_meeting_markdown', { meetingId });
       if (path) {
         toast.success('Exported to Obsidian', { description: path });
       }
@@ -34,9 +34,9 @@ export function ExportToObsidianButton({ meetingId }: { meetingId: string }) {
       size="sm"
       variant="outline"
       className="px-2 @[22rem]:px-4"
-      onClick={(event) => handleExport(event.altKey)}
+      onClick={handleExport}
       disabled={isExporting}
-      title="Export to Obsidian (Option-click to choose another folder)"
+      title="Export to Obsidian"
     >
       {isExporting ? <Loader2 className="animate-spin @[22rem]:mr-2" size={18} /> : <FileDown className="@[22rem]:mr-2" size={18} />}
       <span className="hidden @[22rem]:inline">Obsidian</span>
