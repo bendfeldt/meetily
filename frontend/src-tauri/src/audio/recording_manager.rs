@@ -356,9 +356,9 @@ impl RecordingManager {
             error!("Error during force flush: {}", e);
         }
 
-        // CRITICAL: Full cleanup to release all Arc references and resources
-        // This ensures microphone is released even if Drop is delayed
-        self.state.cleanup();
+        // No state.cleanup() here: state.stop_recording() above already dropped
+        // the audio sender and device references, and the stop tail still
+        // reads duration/stats (save_recording_only, analytics). Drop cleans up.
 
         info!("✅ Recording streams stopped with immediate flush completed");
         Ok(())
@@ -626,5 +626,34 @@ mod wake_tests {
         // Nonexistent device name fails at the `find` step — no audio hardware needed.
         // Asserts the wake is non-fatal (returns Err, does not panic).
         assert!(wake_audio_connection_sync("__no_such_device__").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn duration_survives_stop_streams_and_force_flush() {
+        let mut manager = RecordingManager::new();
+        manager.state.start_recording().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        manager.stop_streams_and_force_flush().await.unwrap();
+
+        // save_recording_only and the meeting-end analytics read these after
+        // the (possibly minutes-long) transcription drain.
+        let active = manager
+            .get_active_recording_duration()
+            .expect("active duration must survive stop");
+        let total = manager
+            .get_recording_duration()
+            .expect("total duration must survive stop");
+        assert!(active >= 0.02);
+
+        // The drain must not count as recording time.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(manager.get_active_recording_duration(), Some(active));
+        assert_eq!(manager.get_recording_duration(), Some(total));
     }
 }
