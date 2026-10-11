@@ -429,9 +429,16 @@ impl WhisperEngine {
 
     // Check for obviously meaningless patterns
     fn is_meaningless_output(text: &str) -> bool {
-        let text_lower = text.to_lowercase();
-        // Match the whole output ("[Applause]", "Thank you for watching."), not phrases inside speech
-        let text_lower = text_lower.trim_matches(|c: char| !c.is_alphanumeric());
+        // Normalize: lowercase, non-alphanumeric chars become spaces, single spaces, padded
+        let normalized: String = text
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+            .collect();
+        let mut rest = format!(
+            " {} ",
+            normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
 
         // Check for common meaningless patterns
         let meaningless_patterns = [
@@ -446,10 +453,18 @@ impl WhisperEngine {
             "ah ah ah",
         ];
 
+        // Meaningless only if the output is made of fillers alone ("[Applause]",
+        // "Thanks for watching! Like and subscribe!"), not speech that mentions one
+        let mut removed_any = false;
         for pattern in &meaningless_patterns {
-            if text_lower == *pattern {
-                return true;
+            let needle = format!(" {} ", pattern);
+            while rest.contains(&needle) {
+                rest = rest.replacen(&needle, " ", 1);
+                removed_any = true;
             }
+        }
+        if removed_any && !rest.chars().any(char::is_alphanumeric) {
+            return true;
         }
 
         // Check if text is mostly the same character or very short repetitive patterns
@@ -1704,6 +1719,36 @@ mod tests {
             "♪ music playing ♪",
         ] {
             assert!(WhisperEngine::is_meaningless_output(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn meaningless_filter_drops_output_made_only_of_several_fillers() {
+        for text in [
+            "Thanks for watching! Like and subscribe!",
+            "uh uh uh ah ah ah",
+        ] {
+            assert!(WhisperEngine::is_meaningless_output(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn meaningless_filter_keeps_speech_around_fillers_and_non_latin_text() {
+        for text in [
+            "Thank you for watching, everyone",
+            "Привет, как дела?",
+            "日本語のテスト",
+        ] {
+            assert!(!WhisperEngine::is_meaningless_output(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn meaningless_filter_leaves_punctuation_only_output_alone() {
+        // Unchanged behaviour: not meaningless, so clean_repetitive_text returns it as is
+        for text in ["...", "[ ]"] {
+            assert!(!WhisperEngine::is_meaningless_output(text), "{text}");
+            assert_eq!(WhisperEngine::clean_repetitive_text(text), text);
         }
     }
 }
