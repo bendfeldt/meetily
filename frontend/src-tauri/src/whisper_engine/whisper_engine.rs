@@ -1,6 +1,6 @@
 // Commit name to recover the serial whisper engine processing for smaller meetings [Slower processing but dooes not fail] - "before parallel processing implementation"
 
-use std::path::{PathBuf};
+use std::path::{Path, PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,6 +51,14 @@ struct DownloadStateTestHook {
 #[derive(Debug, thiserror::Error)]
 #[error("Download cancelled by user")]
 pub(crate) struct DownloadCancelled;
+
+/// In-progress downloads are written here and renamed to `final_path` only after validation,
+/// so an interrupted download is never mistaken for an installed model.
+fn partial_download_path(final_path: &Path) -> PathBuf {
+    let mut path = final_path.as_os_str().to_owned();
+    path.push(".part");
+    PathBuf::from(path)
+}
 
 pub(crate) fn is_download_cancelled(error: &anyhow::Error) -> bool {
     error.downcast_ref::<DownloadCancelled>().is_some()
@@ -847,8 +855,9 @@ impl WhisperEngine {
             return result;
         }
 
+        let part_path = partial_download_path(file_path);
         if result.is_ok() && !active_download.cancellation.is_cancelled() {
-            result = self.validate_model_file(file_path).await;
+            result = self.validate_model_file(&part_path).await;
 
             if result.is_ok() {
                 let expected_min_size = WHISPER_MODEL_CATALOG
@@ -857,7 +866,7 @@ impl WhisperEngine {
                     .map(|model| ((model.2 as f64 * 0.9) as u64) * 1024 * 1024);
 
                 result = match expected_min_size {
-                    Some(expected_min_size) => match fs::metadata(file_path).await {
+                    Some(expected_min_size) => match fs::metadata(&part_path).await {
                         Ok(metadata) if metadata.len() >= expected_min_size => Ok(()),
                         Ok(metadata) => Err(anyhow!(
                             "Downloaded model file is too small: {} bytes (expected at least {} bytes)",
@@ -875,13 +884,23 @@ impl WhisperEngine {
                     )),
                 };
             }
+
+            if result.is_ok() {
+                result = fs::rename(&part_path, file_path)
+                    .await
+                    .map_err(|e| anyhow!("Failed to finalize downloaded model file: {}", e));
+            }
         }
 
-        if result.is_err() && !active_download.cancellation.is_cancelled() && file_path.exists() {
-            if let Err(e) = fs::remove_file(file_path).await {
-                log::warn!("Failed to clean up failed download file: {}", e);
-            } else {
-                log::info!("Cleaned up failed download file: {}", file_path.display());
+        if result.is_err() && !active_download.cancellation.is_cancelled() {
+            for path in [&part_path, file_path] {
+                if path.exists() {
+                    if let Err(e) = fs::remove_file(path).await {
+                        log::warn!("Failed to clean up failed download file: {}", e);
+                    } else {
+                        log::info!("Cleaned up failed download file: {}", path.display());
+                    }
+                }
             }
         }
 
@@ -905,11 +924,13 @@ impl WhisperEngine {
 
         if cancellation_won {
             result = Err(DownloadCancelled.into());
-            if file_path.exists() {
-                if let Err(e) = fs::remove_file(file_path).await {
-                    log::warn!("Failed to clean up cancelled download file: {}", e);
-                } else {
-                    log::info!("Cleaned up cancelled download file: {}", file_path.display());
+            for path in [&part_path, file_path] {
+                if path.exists() {
+                    if let Err(e) = fs::remove_file(path).await {
+                        log::warn!("Failed to clean up cancelled download file: {}", e);
+                    } else {
+                        log::info!("Cleaned up cancelled download file: {}", path.display());
+                    }
                 }
             }
 
@@ -1038,7 +1059,7 @@ impl WhisperEngine {
         }
 
         let total_size = response.content_length().unwrap_or(0);
-        let mut file = fs::File::create(file_path)
+        let mut file = fs::File::create(partial_download_path(file_path))
             .await
             .map_err(|e| anyhow!("Failed to create file: {}", e))?;
 
@@ -1232,11 +1253,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
         let model_path = dir.path().join("ggml-tiny.bin");
+        let part_path = partial_download_path(&model_path);
 
-        std::fs::write(&model_path, b"ggml\0\0\0\0").unwrap();
+        std::fs::write(&part_path, b"ggml\0\0\0\0").unwrap();
         std::fs::OpenOptions::new()
             .write(true)
-            .open(&model_path)
+            .open(&part_path)
             .unwrap()
             .set_len(68 * 1024 * 1024)
             .unwrap();
@@ -1255,6 +1277,8 @@ mod tests {
             .unwrap();
 
         assert!(!engine.active_downloads.lock().await.contains_key("tiny"));
+        assert!(model_path.exists());
+        assert!(!part_path.exists());
         assert!(matches!(
             engine
                 .available_models
@@ -1278,7 +1302,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
         let model_path = dir.path().join("ggml-tiny.bin");
-        std::fs::write(&model_path, b"not-a-model").unwrap();
+        let part_path = partial_download_path(&model_path);
+        std::fs::write(&part_path, b"not-a-model").unwrap();
 
         engine.discover_models().await.unwrap();
         let active_download = engine.reserve_active_download("tiny").await.unwrap();
@@ -1292,6 +1317,7 @@ mod tests {
             .contains("Invalid model file: missing GGML/GGUF magic number"));
         assert!(!engine.active_downloads.lock().await.contains_key("tiny"));
         assert!(!model_path.exists());
+        assert!(!part_path.exists());
         assert!(matches!(
             engine
                 .available_models
@@ -1423,11 +1449,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
         let model_path = dir.path().join("ggml-tiny.bin");
+        let part_path = partial_download_path(&model_path);
 
-        std::fs::write(&model_path, b"ggml\0\0\0\0").unwrap();
+        std::fs::write(&part_path, b"ggml\0\0\0\0").unwrap();
         std::fs::OpenOptions::new()
             .write(true)
-            .open(&model_path)
+            .open(&part_path)
             .unwrap()
             .set_len(68 * 1024 * 1024)
             .unwrap();
@@ -1621,6 +1648,54 @@ mod tests {
         let _ = release_b.send(());
         let _ = server_a.await;
         let _ = server_b.await;
+    }
+
+    #[tokio::test]
+    async fn interrupted_download_writes_to_part_file_not_final_model_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine =
+            Arc::new(WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap());
+        let model_path = dir.path().join("ggml-tiny.bin");
+        let part_path = dir.path().join("ggml-tiny.bin.part");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release_body, body_released) = oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nggml")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            let _ = body_released.await;
+        });
+
+        let download_engine = Arc::clone(&engine);
+        let download = tokio::spawn(async move {
+            download_engine
+                .download_model_from_url("tiny", &format!("http://{address}/model.bin"), None)
+                .await
+        });
+
+        timeout(Duration::from_secs(1), async {
+            while std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0) < 4 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("in-progress bytes should be written to the .part file");
+        assert!(!model_path.exists());
+
+        engine.cancel_download("tiny").await.unwrap();
+        assert!(is_download_cancelled(&download.await.unwrap().unwrap_err()));
+        assert!(!part_path.exists());
+        assert!(!model_path.exists());
+
+        let _ = release_body.send(());
+        let _ = server.await;
     }
 
     #[tokio::test]
