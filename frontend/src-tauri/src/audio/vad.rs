@@ -8,6 +8,10 @@ use std::time::Duration;
 /// sample count and timestamp inside this module is expressed in it.
 const VAD_SAMPLE_RATE: u32 = 16000;
 
+/// Longest speech segment emitted before it is force-closed. Without a cap, audio
+/// with no qualifying silence (webinar, podcast) keeps one segment open for hours.
+const MAX_SEGMENT_MS: u32 = 30_000;
+
 /// Represents a complete speech segment detected by VAD
 #[derive(Debug, Clone)]
 pub struct SpeechSegment {
@@ -15,6 +19,50 @@ pub struct SpeechSegment {
     pub start_timestamp_ms: f64,
     pub end_timestamp_ms: f64,
     pub confidence: f32,
+}
+
+fn sample_to_ms(sample: usize) -> f64 {
+    (sample as f64 / VAD_SAMPLE_RATE as f64) * 1000.0
+}
+
+/// Builds a segment from `active_speech[emitted..end]`, where `active_speech` is the
+/// current utterance starting at session sample `speech_start_sample` and `emitted`
+/// is how much of it earlier forced splits already delivered.
+fn unemitted_speech(
+    active_speech: &[f32],
+    speech_start_sample: usize,
+    emitted: usize,
+    end: usize,
+    confidence: f32,
+) -> Option<SpeechSegment> {
+    let samples = active_speech.get(emitted..end).filter(|s| !s.is_empty())?;
+    Some(SpeechSegment {
+        samples: samples.to_vec(),
+        start_timestamp_ms: sample_to_ms(speech_start_sample + emitted),
+        end_timestamp_ms: sample_to_ms(speech_start_sample + end),
+        confidence,
+    })
+}
+
+/// Force-closes the next `MAX_SEGMENT_MS` of the current utterance once that much
+/// speech has accumulated without a qualifying silence.
+fn split_long_speech(
+    active_speech: &[f32],
+    speech_start_sample: usize,
+    emitted: usize,
+) -> Option<SpeechSegment> {
+    let max_samples = MAX_SEGMENT_MS as usize * VAD_SAMPLE_RATE as usize / 1000;
+    if active_speech.len().saturating_sub(emitted) < max_samples {
+        return None;
+    }
+    // Same confidence as the force-end in `flush()`.
+    unemitted_speech(
+        active_speech,
+        speech_start_sample,
+        emitted,
+        emitted + max_samples,
+        0.8,
+    )
 }
 
 /// Processes audio in 30ms chunks but returns complete speech segments
@@ -28,6 +76,8 @@ pub struct ContinuousVadProcessor {
     in_speech: bool,
     processed_samples: usize,
     speech_start_sample: usize,
+    /// Samples of the current utterance already delivered by forced splits.
+    speech_emitted_samples: usize,
     last_logged_state: bool,
     large_speech_buffer_warned: bool,
 }
@@ -49,8 +99,8 @@ impl ContinuousVadProcessor {
         // Use the caller's redemption time without additional capping. The batch
         // paths (`import.rs`, `retranscription.rs`) pass 2000ms to bridge natural
         // pauses; the live path (`pipeline.rs`) passes 500ms to reduce pause-induced
-        // latency. A qualifying silence is still required; bounded uninterrupted-
-        // speech delivery is tracked in #756.
+        // latency. Uninterrupted speech is additionally force-split every
+        // MAX_SEGMENT_MS in `process_audio` (#756).
         config.redemption_time = Duration::from_millis(redemption_time_ms as u64);
         config.pre_speech_pad = Duration::from_millis(300);   // Pre-speech padding for context
         config.post_speech_pad = Duration::from_millis(400);  // Increased: more context at end
@@ -82,6 +132,7 @@ impl ContinuousVadProcessor {
             in_speech: false,
             processed_samples: 0,
             speech_start_sample: 0,
+            speech_emitted_samples: 0,
             last_logged_state: false,
             large_speech_buffer_warned: false,
         })
@@ -104,6 +155,24 @@ impl ContinuousVadProcessor {
         while self.buffer.len() >= self.chunk_size {
             let chunk: Vec<f32> = self.buffer.drain(..self.chunk_size).collect();
             self.process_chunk(&chunk)?;
+
+            // Without a qualifying silence Silero keeps the utterance open indefinitely;
+            // deliver it in bounded pieces while it continues.
+            if self.in_speech {
+                if let Some(segment) = split_long_speech(
+                    self.session.get_current_speech(),
+                    self.speech_start_sample,
+                    self.speech_emitted_samples,
+                ) {
+                    debug!(
+                        "VAD: Force-splitting long speech at {}ms",
+                        segment.end_timestamp_ms
+                    );
+                    self.speech_emitted_samples += segment.samples.len();
+                    self.speech_segments.push_back(segment);
+                    self.current_speech.clear();
+                }
+            }
 
             // Extract any completed speech segments
             while let Some(segment) = self.speech_segments.pop_front() {
@@ -206,23 +275,33 @@ impl ContinuousVadProcessor {
                     real_sample_count
                 ));
             }
-            let samples = active_speech[..real_sample_count].to_vec();
-            let start_ms =
-                (self.speech_start_sample as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
-            let end_ms = (real_end_sample as f64 / VAD_SAMPLE_RATE as f64) * 1000.0;
+            // Estimated confidence for forced end
+            let segment = unemitted_speech(
+                active_speech,
+                self.speech_start_sample,
+                self.speech_emitted_samples,
+                real_sample_count,
+                0.8,
+            )
+            .ok_or_else(|| {
+                anyhow!(
+                    "VAD flush invariant violated: {} samples already emitted of a {} sample utterance",
+                    self.speech_emitted_samples,
+                    real_sample_count
+                )
+            })?;
 
-            debug!("VAD flush: Force-ending speech - start={}ms, end={}ms, duration={}ms, samples={}",
-                  start_ms, end_ms, end_ms - start_ms, samples.len());
-
-            let segment = SpeechSegment {
-                samples,
-                start_timestamp_ms: start_ms,
-                end_timestamp_ms: end_ms,
-                confidence: 0.8, // Estimated confidence for forced end
-            };
+            debug!(
+                "VAD flush: Force-ending speech - start={}ms, end={}ms, duration={}ms, samples={}",
+                segment.start_timestamp_ms,
+                segment.end_timestamp_ms,
+                segment.end_timestamp_ms - segment.start_timestamp_ms,
+                segment.samples.len()
+            );
 
             self.speech_segments.push_back(segment);
             self.current_speech.clear();
+            self.speech_emitted_samples = 0;
             self.in_speech = false;
         }
 
@@ -264,6 +343,7 @@ impl ContinuousVadProcessor {
                     // surfaced once per recording, on the final segment — which landed at
                     // ~2x the file duration and sorted to the end of the transcript.
                     self.speech_start_sample = timestamp_ms * VAD_SAMPLE_RATE as usize / 1000;
+                    self.speech_emitted_samples = 0;
                     self.current_speech.clear();
                 }
                 VadTransition::SpeechEnd { start_timestamp_ms, end_timestamp_ms, samples } => {
@@ -274,9 +354,11 @@ impl ContinuousVadProcessor {
                     }
                     self.in_speech = false;
 
-                    // Use samples from VAD transition if available, otherwise use accumulated samples
+                    // Use samples from VAD transition if available, otherwise use accumulated samples.
+                    // Forced splits already delivered the start of the utterance; send only the rest.
+                    let emitted = std::mem::take(&mut self.speech_emitted_samples);
                     let speech_samples = if !samples.is_empty() {
-                        samples
+                        samples.get(emitted..).unwrap_or_default().to_vec()
                     } else {
                         self.current_speech.clone()
                     };
@@ -284,7 +366,7 @@ impl ContinuousVadProcessor {
                     if !speech_samples.is_empty() {
                         let segment = SpeechSegment {
                             samples: speech_samples,
-                            start_timestamp_ms: start_timestamp_ms as f64,
+                            start_timestamp_ms: start_timestamp_ms as f64 + sample_to_ms(emitted),
                             end_timestamp_ms: end_timestamp_ms as f64,
                             confidence: 0.9, // VAD confidence
                         };
@@ -763,6 +845,67 @@ mod tests {
         assert!(
             processor.flush().expect("second flush failed").is_empty(),
             "flush() must not emit the same forced segment twice"
+        );
+    }
+
+    /// Continuous speech with no qualifying silence (webinar, podcast) must be cut into
+    /// bounded segments while it is still running, and the cuts plus the final remainder
+    /// must reproduce the utterance exactly: no gap, no overlap, no dropped sample.
+    ///
+    /// Synthetic audio cannot hold Silero in speech for 60s, so this drives the split
+    /// helpers the way `process_audio` and `flush` do, on a growing active-speech buffer.
+    #[test]
+    fn test_continuous_speech_is_split_into_bounded_contiguous_segments() {
+        let audio = generate_test_audio_with_speech(5.0, 16000).repeat(13); // 65s
+        let speech_start_sample = 7_200; // utterance starts at 450ms
+        let utterance = &audio[speech_start_sample..];
+
+        let mut emitted = 0;
+        let mut segments = Vec::new();
+        let mut seen = 0;
+        while seen < utterance.len() {
+            seen = (seen + 480).min(utterance.len());
+            if let Some(segment) =
+                split_long_speech(&utterance[..seen], speech_start_sample, emitted)
+            {
+                emitted += segment.samples.len();
+                segments.push(segment);
+            }
+        }
+        let live_segments = segments.len();
+        segments.extend(unemitted_speech(
+            utterance,
+            speech_start_sample,
+            emitted,
+            utterance.len(),
+            0.8,
+        ));
+
+        let max_samples = MAX_SEGMENT_MS as usize * VAD_SAMPLE_RATE as usize / 1000;
+        assert!(
+            live_segments >= 2,
+            "expected >= 2 forced segments, got {}",
+            live_segments
+        );
+        assert!(segments
+            .iter()
+            .all(|s| !s.samples.is_empty() && s.samples.len() <= max_samples));
+        assert_eq!(segments[0].start_timestamp_ms, 450.0);
+        for pair in segments.windows(2) {
+            assert_eq!(
+                pair[0].end_timestamp_ms, pair[1].start_timestamp_ms,
+                "segments must be contiguous"
+            );
+        }
+        assert_eq!(segments.last().map(|s| s.end_timestamp_ms), Some(65_000.0));
+        let joined: Vec<f32> = segments
+            .iter()
+            .flat_map(|s| s.samples.iter().copied())
+            .collect();
+        assert_eq!(
+            joined.as_slice(),
+            utterance,
+            "split must not drop or duplicate samples"
         );
     }
 }
