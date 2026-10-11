@@ -8,7 +8,8 @@
 # Builds are ad-hoc signed (no Apple Developer ID), so macOS asks for
 # confirmation on first open; see docs/BUILD_DMG.md. Fork builds use
 # tauri.fork.conf.json: no updater artifacts, and the updater points at this
-# fork's releases so the app never offers to replace itself with upstream.
+# fork's releases, which publish no latest.json, so no update is ever offered
+# (the app never replaces itself with upstream).
 name: "Fork - macOS DMG"
 
 on:
@@ -21,7 +22,8 @@ on:
         default: release
   push:
     tags: ["fork-v*"]
-    # Also build when the packaging itself changes, so a broken .dmg build is
+    # Path filters are not evaluated for tag pushes, so fork-v* tags always
+    # build. Also build when the packaging itself changes, so a broken .dmg build is
     # caught on the branch that broke it.
     branches: ["main", "enhance/**", "fix/**"]
     paths:
@@ -114,8 +116,8 @@ jobs:
         id: out
         run: |
           B="target/${TARGET}/${{ steps.cfg.outputs.profile }}/bundle"
-          DMG=$(find "$B/dmg" -name '*.dmg' | head -1)
-          APP=$(find "$B/macos" -maxdepth 1 -name '*.app' | head -1)
+          DMG=$(find "$B/dmg" -name '*.dmg' 2>/dev/null | head -1 || true)
+          APP=$(find "$B/macos" -maxdepth 1 -name '*.app' 2>/dev/null | head -1 || true)
           test -n "$DMG" && test -n "$APP" || { echo "::error::no .dmg or .app produced"; find "$B" -maxdepth 2; exit 1; }
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
           echo "app=$APP" >> "$GITHUB_OUTPUT"
@@ -131,11 +133,15 @@ jobs:
           compgen -G "$APP/Contents/MacOS/ffmpeg*" > /dev/null || { echo "::error::ffmpeg sidecar missing"; exit 1; }
           compgen -G "$APP/Contents/MacOS/llama-helper*" > /dev/null || { echo "::error::llama-helper sidecar missing"; exit 1; }
           ls -la "$APP/Contents/MacOS/"
-          plutil -p "$APP/Contents/Info.plist" | grep -E 'CFBundleShortVersionString|NSMicrophoneUsageDescription|LSMinimumSystemVersion' || true
+          for key in CFBundleShortVersionString NSMicrophoneUsageDescription; do
+            plutil -extract "$key" raw "$APP/Contents/Info.plist" > /dev/null \
+              || { echo "::error::Info.plist is missing $key"; exit 1; }
+          done
+          echo "Version: $(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
           hdiutil verify "${{ steps.out.outputs.dmg }}"
 
-      # Launch the app from the mounted .dmg the way a user would and check it
-      # is still running after 30 s (catches missing dylibs, startup panics,
+      # Copy the .app out of the mounted .dmg (as a user's drag to Applications
+      # does), launch that copy and check it is still running after 30 s (catches missing dylibs, startup panics,
       # DB migration crashes). No microphone or Teams on CI runners, so audio
       # and the Teams pop-up are not exercised here.
       - name: Smoke test - app starts and stays up

@@ -107,7 +107,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          key: fork-macos-rust-checks
+          key: fork-ci-rust-macos
 
       # tauri-build only checks that these paths exist; the real artifacts are
       # produced by fork-macos-dmg.yml. build.rs downloads FFmpeg itself.
@@ -133,12 +133,14 @@ jobs:
   ci-ok:
     name: Fork CI result
     if: always()
-    needs: [ui, rust-macos]
+    needs: [changes, ui, rust-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any job failed or was cancelled
         run: |
-          echo "ui=${{ needs.ui.result }} rust-macos=${{ needs.rust-macos.result }}"
+          echo "changes=${{ needs.changes.result }} ui=${{ needs.ui.result }} rust-macos=${{ needs.rust-macos.result }}"
+          # Without a successful change detection nothing was verified.
+          [ "${{ needs.changes.result }}" = "success" ] || exit 1
           for r in "${{ needs.ui.result }}" "${{ needs.rust-macos.result }}"; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then exit 1; fi
           done

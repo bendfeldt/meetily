@@ -21,6 +21,9 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 - Step 1 done: `.github/workflows/fork-macos-rust-checks.yml` (cargo check,
   clippy report-only, cargo test on macos-latest) green on unchanged upstream
   code (run 38088365544).
+  Since replaced by `fork-ci.yml` (UI + macOS Rust on every PR/push, check
+  "Fork CI result"); app/.dmg builds via `fork-macos-dmg.yml`, see
+  `docs/BUILD_DMG.md`.
 - Step 2 done: opt-in Obsidian export. `fork_settings.rs` (own store file),
   `obsidian_export.rs` (render, file naming, find-by-id, rename, sync), an
   "Obsidian" button in the meeting transcript toolbar (folder chosen on

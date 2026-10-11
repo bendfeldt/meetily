@@ -7,9 +7,9 @@ either from GitHub Actions (recommended) or on your own Mac. Fork-only document.
 
 | Check | Where | Proves |
 |---|---|---|
-| `Fork - CI` → `ui` | every push / PR | TypeScript compiles, frontend unit tests pass, the Next.js UI exports |
+| `Fork - CI` → `ui` | pushes / PRs that change UI files | TypeScript compiles, frontend unit tests pass, the Next.js UI exports |
 | `Fork - CI` → `rust-macos` | every push / PR touching Rust | Rust core (incl. macOS-only Teams detector and pop-up) compiles and its unit tests pass on macOS |
-| `Fork - macOS DMG` | on demand / `fork-v*` tag | the full app bundles, sidecars (FFmpeg, llama-helper) are inside, the signature is consistent, the `.dmg` is valid, and the app starts from the `.dmg` and stays up for 30 s |
+| `Fork - macOS DMG` | on demand / `fork-v*` tag | the full app bundles, sidecars (FFmpeg, llama-helper) are inside, the signature is consistent, the `.dmg` is valid, and the app copied out of the `.dmg` starts and stays up for 30 s |
 | You, on your Mac | after installing | recording, transcription, Teams pop-up (see the checklist below) |
 
 CI runners have no microphone and no Teams, so recording, transcription
@@ -80,8 +80,11 @@ Result: `target/aarch64-apple-darwin/release/bundle/dmg/meetily_<version>_aarch6
 
 Always pass `--config src-tauri/tauri.fork.conf.json` for fork builds. It
 turns off updater artifacts (they need upstream's private signing key) and
-points the in-app updater at this fork's releases, so the app never offers
-to "update" to upstream Meetily and drop the fork's features.
+points the in-app updater at this fork's releases. Those publish no
+`latest.json`, so the update check finds nothing and the app never offers to
+"update" to upstream Meetily and drop the fork's features. (Upstream's
+release build also passes license/Supabase secrets; this tree's code does
+not read them, so fork builds don't need them.)
 
 ## Installing
 
