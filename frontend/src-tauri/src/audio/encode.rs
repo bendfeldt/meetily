@@ -77,12 +77,19 @@ pub fn encode_single_audio(
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to spawn FFmpeg process: {}", e))?;
     debug!("FFmpeg process spawned");
-    let mut stdin = ffmpeg
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to open FFmpeg stdin"))?;
+    let Some(mut stdin) = ffmpeg.stdin.take() else {
+        let _ = ffmpeg.kill();
+        let _ = ffmpeg.wait();
+        return Err(anyhow::anyhow!("Failed to open FFmpeg stdin"));
+    };
 
-    stdin.write_all(data)?;
+    if let Err(e) = stdin.write_all(data) {
+        // FFmpeg likely exited early (e.g. bad output path): reap it, no zombie
+        drop(stdin);
+        let _ = ffmpeg.kill();
+        let _ = ffmpeg.wait();
+        return Err(e.into());
+    }
 
     debug!("Dropping stdin");
     drop(stdin);
@@ -106,4 +113,47 @@ pub fn encode_single_audio(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Zombie `ffmpeg` children of this test process (Linux only).
+    #[cfg(target_os = "linux")]
+    fn zombie_ffmpeg_children() -> usize {
+        let mut count = 0;
+        for task in std::fs::read_dir("/proc/self/task").unwrap().flatten() {
+            let children =
+                std::fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            for pid in children.split_whitespace() {
+                let stat =
+                    std::fs::read_to_string(format!("/proc/{}/stat", pid)).unwrap_or_default();
+                if stat.contains("(ffmpeg) Z") {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn test_encode_to_missing_dir_returns_err_and_reaps_ffmpeg() {
+        if find_ffmpeg_path().is_none() {
+            eprintln!("FFmpeg not installed, skipping");
+            return;
+        }
+        let temp_dir = tempfile::tempdir().unwrap();
+        let output = temp_dir.path().join("missing").join("out.mp4");
+        // Large enough that FFmpeg exits before reading it all (write fails with EPIPE)
+        let data = vec![0u8; 64 * 1024 * 1024];
+
+        assert!(encode_single_audio(&data, 48000, 1, &output).is_err());
+
+        #[cfg(target_os = "linux")]
+        {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert_eq!(zombie_ffmpeg_children(), 0);
+        }
+    }
 }
