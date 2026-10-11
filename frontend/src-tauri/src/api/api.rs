@@ -2,6 +2,7 @@ use log::{debug as log_debug, error as log_error, info as log_info, warn as log_
 use crate::utils::url_origin_for_log;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
 
@@ -16,6 +17,7 @@ use crate::{
     state::AppState,
     summary::CustomOpenAIConfig,
 };
+use sqlx::SqlitePool;
 
 // Hardcoded server URL
 const APP_SERVER_URL: &str = "http://localhost:5167";
@@ -766,6 +768,64 @@ pub async fn api_delete_api_key<R: Runtime>(
     }
 }
 
+/// Returns the canonical folder if it is a directory strictly inside `root`
+/// (symlinks and `..` are resolved first, so they cannot escape the root).
+fn folder_inside_root(folder: &Path, root: &Path) -> Option<PathBuf> {
+    let folder = folder.canonicalize().ok()?;
+    let root = root.canonicalize().ok()?;
+    (folder != root && folder.starts_with(&root) && folder.is_dir()).then_some(folder)
+}
+
+/// Deletes the meeting's rows, then its recording folder when that folder is
+/// inside `recordings_root` and no other meeting uses it. A failed folder
+/// removal is logged and does not fail the delete.
+async fn delete_meeting_and_folder(
+    pool: &SqlitePool,
+    meeting_id: &str,
+    recordings_root: &Path,
+) -> Result<bool, sqlx::Error> {
+    let folder: Option<String> =
+        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    let shared: i64 = match &folder {
+        Some(f) => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE folder_path = ? AND id != ?")
+                .bind(f)
+                .bind(meeting_id)
+                .fetch_one(pool)
+                .await?
+        }
+        None => 0,
+    };
+
+    if !MeetingsRepository::delete_meeting(pool, meeting_id).await? {
+        return Ok(false);
+    }
+
+    let Some(folder) = folder else {
+        return Ok(true);
+    };
+    match folder_inside_root(Path::new(&folder), recordings_root) {
+        Some(dir) if shared == 0 => {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                log_warn!(
+                    "Could not remove recording folder of meeting {}: {}",
+                    meeting_id,
+                    e.kind()
+                );
+            }
+        }
+        _ => log_warn!(
+            "Kept recording folder of meeting {} (shared, missing or outside the recordings folder)",
+            meeting_id
+        ),
+    }
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn api_delete_meeting<R: Runtime>(
     _app: AppHandle<R>,
@@ -781,7 +841,8 @@ pub async fn api_delete_meeting<R: Runtime>(
 
     let pool = state.db_manager.pool();
 
-    match MeetingsRepository::delete_meeting(pool, &meeting_id).await {
+    let recordings_root = crate::audio::recording_preferences::get_default_recordings_folder();
+    match delete_meeting_and_folder(pool, &meeting_id, &recordings_root).await {
         Ok(true) => {
             log_info!("Successfully deleted meeting {}", meeting_id);
             Ok(serde_json::json!({
@@ -1399,5 +1460,96 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", error))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn db() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn add_meeting(pool: &SqlitePool, id: &str, folder: &Path) {
+        sqlx::query(
+            "INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 't', datetime('now'), datetime('now'), ?)",
+        )
+        .bind(id)
+        .bind(folder.to_string_lossy().to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn only_folders_strictly_inside_the_recordings_root_are_removable() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("recordings");
+        let meeting = root.join("Meeting 1");
+        let outside = base.path().join("elsewhere");
+        std::fs::create_dir_all(&meeting).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        assert_eq!(
+            folder_inside_root(&meeting, &root),
+            Some(meeting.canonicalize().unwrap())
+        );
+        assert_eq!(folder_inside_root(&root, &root), None);
+        assert_eq!(folder_inside_root(&outside, &root), None);
+        assert_eq!(folder_inside_root(&root.join("missing"), &root), None);
+        assert_eq!(
+            folder_inside_root(&root.join("Meeting 1/../../elsewhere"), &root),
+            None
+        );
+        #[cfg(unix)]
+        {
+            let link = root.join("link");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert_eq!(folder_inside_root(&link, &root), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_meeting_removes_its_folder_unless_shared_or_outside_root() {
+        let pool = db().await;
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("recordings");
+        let own = root.join("own");
+        let shared = root.join("shared");
+        let outside = base.path().join("elsewhere");
+        for dir in [&own, &shared, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("transcripts.json"), "[]").unwrap();
+        }
+        add_meeting(&pool, "m1", &own).await;
+        add_meeting(&pool, "m2", &shared).await;
+        add_meeting(&pool, "m3", &shared).await;
+        add_meeting(&pool, "m4", &outside).await;
+
+        assert!(delete_meeting_and_folder(&pool, "m1", &root).await.unwrap());
+        assert!(!own.exists(), "own folder must be removed");
+        assert!(delete_meeting_and_folder(&pool, "m2", &root).await.unwrap());
+        assert!(shared.exists(), "folder still used by m3 must be kept");
+        assert!(delete_meeting_and_folder(&pool, "m4", &root).await.unwrap());
+        assert!(
+            outside.exists(),
+            "folder outside the recordings root must be kept"
+        );
+        assert!(!delete_meeting_and_folder(&pool, "missing", &root)
+            .await
+            .unwrap());
+
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM meetings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 1);
     }
 }
