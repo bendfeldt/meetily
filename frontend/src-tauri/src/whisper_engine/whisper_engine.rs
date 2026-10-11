@@ -780,6 +780,7 @@ impl WhisperEngine {
                 } else {
                     log::warn!("File '{}' does not exist, nothing to delete", model_info.path.display());
                 }
+                Self::remove_stale_partial_download(&model_info.path).await;
 
                 // Update model status to Missing
                 {
@@ -802,6 +803,7 @@ impl WhisperEngine {
                 } else {
                     log::warn!("File '{}' does not exist, nothing to delete", model_info.path.display());
                 }
+                Self::remove_stale_partial_download(&model_info.path).await;
 
                 // Update model status to Missing
                 {
@@ -819,6 +821,16 @@ impl WhisperEngine {
         }
     }
     
+    /// Removes a `.part` left behind by a download that was interrupted by a crash or quit.
+    async fn remove_stale_partial_download(model_path: &Path) {
+        let part_path = partial_download_path(model_path);
+        if part_path.exists() {
+            if let Err(e) = fs::remove_file(&part_path).await {
+                log::warn!("Failed to remove stale partial download: {}", e);
+            }
+        }
+    }
+
     async fn reserve_active_download(&self, model_name: &str) -> Result<Arc<ActiveDownload>> {
         let mut active_downloads = self.active_downloads.lock().await;
         if active_downloads.contains_key(model_name) {
@@ -888,19 +900,15 @@ impl WhisperEngine {
             if result.is_ok() {
                 result = fs::rename(&part_path, file_path)
                     .await
-                    .map_err(|e| anyhow!("Failed to finalize downloaded model file: {}", e));
+                    .map_err(|e| anyhow!("Downloaded model could not be installed: {}", e));
             }
         }
 
-        if result.is_err() && !active_download.cancellation.is_cancelled() {
-            for path in [&part_path, file_path] {
-                if path.exists() {
-                    if let Err(e) = fs::remove_file(path).await {
-                        log::warn!("Failed to clean up failed download file: {}", e);
-                    } else {
-                        log::info!("Cleaned up failed download file: {}", path.display());
-                    }
-                }
+        if result.is_err() && !active_download.cancellation.is_cancelled() && part_path.exists() {
+            if let Err(e) = fs::remove_file(&part_path).await {
+                log::warn!("Failed to clean up failed download file: {}", e);
+            } else {
+                log::info!("Cleaned up failed download file: {}", part_path.display());
             }
         }
 
@@ -924,13 +932,14 @@ impl WhisperEngine {
 
         if cancellation_won {
             result = Err(DownloadCancelled.into());
-            for path in [&part_path, file_path] {
-                if path.exists() {
-                    if let Err(e) = fs::remove_file(path).await {
-                        log::warn!("Failed to clean up cancelled download file: {}", e);
-                    } else {
-                        log::info!("Cleaned up cancelled download file: {}", path.display());
-                    }
+            if part_path.exists() {
+                if let Err(e) = fs::remove_file(&part_path).await {
+                    log::warn!("Failed to clean up cancelled download file: {}", e);
+                } else {
+                    log::info!(
+                        "Cleaned up cancelled download file: {}",
+                        part_path.display()
+                    );
                 }
             }
 
@@ -1756,8 +1765,89 @@ mod tests {
         server.await.unwrap();
 
         assert!(!engine.active_downloads.lock().await.contains_key("tiny"));
-        assert!(!model_path.exists());
+        // A failed attempt never wrote the final path, so the file that was already there is kept.
+        assert!(model_path.exists());
+        assert!(!partial_download_path(&model_path).exists());
         let models = engine.discover_models().await.unwrap();
-        assert!(matches!(tiny_model(&models).status, ModelStatus::Missing));
+        assert!(matches!(
+            tiny_model(&models).status,
+            ModelStatus::Corrupted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn finish_download_replaces_a_pre_existing_corrupted_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        let model_path = dir.path().join("ggml-tiny.bin");
+        let part_path = partial_download_path(&model_path);
+        std::fs::write(&model_path, vec![0_u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&part_path, b"ggml\0\0\0\0").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&part_path)
+            .unwrap()
+            .set_len(68 * 1024 * 1024)
+            .unwrap();
+
+        engine.discover_models().await.unwrap();
+        let active_download = engine.reserve_active_download("tiny").await.unwrap();
+        engine
+            .finish_download("tiny", &active_download, &model_path, Ok(()))
+            .await
+            .unwrap();
+
+        assert!(!part_path.exists());
+        assert!(std::fs::read(&model_path).unwrap().starts_with(b"ggml"));
+        assert!(matches!(
+            tiny_model(&engine.discover_models().await.unwrap()).status,
+            ModelStatus::Available
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_download_keeps_a_pre_existing_installed_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        let model_path = dir.path().join("ggml-tiny.bin");
+        let part_path = partial_download_path(&model_path);
+        std::fs::write(&model_path, b"ggml\0\0\0\0").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&model_path)
+            .unwrap()
+            .set_len(68 * 1024 * 1024)
+            .unwrap();
+        std::fs::write(&part_path, b"not-a-model").unwrap();
+
+        engine.discover_models().await.unwrap();
+        let active_download = engine.reserve_active_download("tiny").await.unwrap();
+        assert!(engine
+            .finish_download("tiny", &active_download, &model_path, Ok(()))
+            .await
+            .is_err());
+
+        assert!(!part_path.exists());
+        assert!(model_path.exists());
+        assert!(matches!(
+            tiny_model(&engine.discover_models().await.unwrap()).status,
+            ModelStatus::Available
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_model_removes_a_stale_partial_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf())).unwrap();
+        let model_path = dir.path().join("ggml-tiny.bin");
+        let part_path = partial_download_path(&model_path);
+        std::fs::write(&model_path, vec![0_u8; 2 * 1024 * 1024]).unwrap();
+        std::fs::write(&part_path, b"ggml").unwrap();
+
+        engine.discover_models().await.unwrap();
+        engine.delete_model("tiny").await.unwrap();
+
+        assert!(!model_path.exists());
+        assert!(!part_path.exists());
     }
 }
