@@ -121,27 +121,19 @@ impl TranscriptsRepository {
     /// Note: the SQL filter uses SQLite LOWER(), which only folds ASCII, so
     /// non-ASCII case differences may not match at the query level.
     fn get_match_context(transcript: &str, query: &str) -> String {
-        // Lowercasing can change byte lengths, so map each lowercased byte back
-        // to the start of the original char it came from.
-        let mut transcript_lower = String::with_capacity(transcript.len());
-        let mut lower_to_orig = Vec::with_capacity(transcript.len() + 1);
-        for (i, c) in transcript.char_indices() {
-            let before = transcript_lower.len();
-            transcript_lower.extend(c.to_lowercase());
-            lower_to_orig.resize(lower_to_orig.len() + transcript_lower.len() - before, i);
-        }
-        lower_to_orig.push(transcript.len());
+        let transcript_lower = transcript.to_lowercase();
         let query_lower = query.to_lowercase();
 
         match transcript_lower.find(&query_lower) {
-            Some(lower_index) => {
-                let match_index = lower_to_orig[lower_index];
-                let match_end = lower_to_orig[lower_index + query_lower.len()];
-                let mut start_index = match_index.saturating_sub(100);
+            Some(match_index) => {
+                // match_index is a byte offset in the lowercased copy. Where lowercasing
+                // changes byte lengths the window may shift a few bytes, so clamp to the
+                // original and snap to its char boundaries to never slice inside a char.
+                let mut start_index = match_index.saturating_sub(100).min(transcript.len());
                 while !transcript.is_char_boundary(start_index) {
                     start_index -= 1;
                 }
-                let mut end_index = (match_end + 100).min(transcript.len());
+                let mut end_index = (match_index + query.len() + 100).min(transcript.len());
                 while !transcript.is_char_boundary(end_index) {
                     end_index += 1;
                 }
@@ -165,21 +157,66 @@ impl TranscriptsRepository {
 mod tests {
     use super::*;
 
+    fn ctx(transcript: &str, query: &str) -> String {
+        TranscriptsRepository::get_match_context(transcript, query)
+    }
+
     #[test]
     fn match_context_handles_multibyte_text() {
         let transcript = format!("{}xhello world", "æ".repeat(60));
-        let context = TranscriptsRepository::get_match_context(&transcript, "HELLO");
-        assert!(context.starts_with("..."));
-        assert!(context.contains("hello"));
+        let expected = format!("...{}xhello world", "æ".repeat(50));
+        assert_eq!(ctx(&transcript, "HELLO"), expected);
+    }
+
+    #[test]
+    fn match_context_handles_emoji_before_match() {
+        let transcript = format!("{}xhello", "😀".repeat(30));
+        let expected = format!("...{}xhello", "😀".repeat(25));
+        assert_eq!(ctx(&transcript, "hello"), expected);
+    }
+
+    #[test]
+    fn match_context_handles_cjk() {
+        let transcript = format!("{}hello{}", "中".repeat(40), "文".repeat(40));
+        let expected = format!("...{}hello{}...", "中".repeat(34), "文".repeat(34));
+        assert_eq!(ctx(&transcript, "hello"), expected);
+    }
+
+    #[test]
+    fn match_context_empty_query() {
+        let transcript = "æ".repeat(60);
+        let expected = format!("{}...", "æ".repeat(50));
+        assert_eq!(ctx(&transcript, ""), expected);
+    }
+
+    #[test]
+    fn match_context_not_found_falls_back() {
+        assert_eq!(ctx(&"æ".repeat(250), "zz"), "æ".repeat(200));
+    }
+
+    #[test]
+    fn match_context_match_at_start() {
+        assert_eq!(ctx("Hello world", "hello"), "Hello world");
+    }
+
+    #[test]
+    fn match_context_match_at_end() {
+        let transcript = format!("{}Hello", "a".repeat(150));
+        let expected = format!("...{}Hello", "a".repeat(100));
+        assert_eq!(ctx(&transcript, "hello"), expected);
+    }
+
+    #[test]
+    fn match_context_length_changing_lowercase_does_not_panic() {
+        // 'İ' is 2 bytes but lowercases to 3, shifting offsets in the lowered copy.
+        let transcript = format!("{}hello", "İ".repeat(60));
+        assert!(ctx(&transcript, "hello").contains("hello"));
     }
 
     #[test]
     fn match_context_ascii_unchanged() {
         let transcript = format!("{}Hello{}", "a".repeat(150), "b".repeat(150));
         let expected = format!("...{}Hello{}...", "a".repeat(100), "b".repeat(100));
-        assert_eq!(
-            TranscriptsRepository::get_match_context(&transcript, "hello"),
-            expected
-        );
+        assert_eq!(ctx(&transcript, "hello"), expected);
     }
 }
