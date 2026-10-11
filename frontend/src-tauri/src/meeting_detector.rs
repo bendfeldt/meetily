@@ -179,11 +179,9 @@ impl Detector {
             self.recording_since = Some(now);
             return;
         }
-        self.state = if self.held_since.is_some() {
-            State::Dismissed
-        } else {
-            State::Idle
-        };
+        // Idle even if Teams still holds the mic (the 4 h cap): the next
+        // polls ask again instead of leaving the rest of the call unrecorded.
+        self.state = State::Idle;
     }
 
     /// Consecutive failed stops of the current pop-up recording.
@@ -526,9 +524,8 @@ mod tests {
         assert!(polls(&mut d, &mut now, 10, false, true).is_empty());
         assert_eq!(polls(&mut d, &mut now, 1, false, true), vec![Action::Stop]);
         assert_eq!(d.state(), State::Stopping);
-        assert!(polls(&mut d, &mut now, 4, true, true).is_empty()); // re-grab while stopping: no prompt
         d.stop_finished(true, now);
-        assert_eq!(d.state(), State::Dismissed);
+        assert_eq!(d.state(), State::Idle);
     }
 
     #[test]
@@ -577,6 +574,13 @@ mod tests {
         assert!(d.tick(now, true, true).is_empty());
         now += T;
         assert_eq!(d.tick(now, true, true), vec![Action::Stop]);
+        // Teams still holds the mic (a meeting over 4 h): ask again, don't go quiet.
+        d.stop_finished(true, now);
+        assert_eq!(d.state(), State::Idle);
+        assert_eq!(
+            polls(&mut d, &mut now, 3, true, false),
+            vec![Action::ShowPrompt]
+        );
     }
 
     #[test]
