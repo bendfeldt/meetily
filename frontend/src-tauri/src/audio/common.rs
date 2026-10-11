@@ -15,6 +15,18 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
 }
 
+pub(crate) const ENGINE_LOCK_BUSY: &str =
+    "The transcription engine is busy (a recording may be starting). Try again in a moment.";
+
+/// Non-waiting variant for user-triggered batch jobs: a stalled recording start
+/// (model check, device open, permission prompt) must not leave a dialog spinning.
+pub(crate) fn try_engine_lifecycle_lock() -> Result<OwnedMutexGuard<()>, String> {
+    ENGINE_LIFECYCLE_LOCK
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| ENGINE_LOCK_BUSY.to_string())
+}
+
 /// Live recording, retranscription and import share one global engine with one
 /// loaded model, so a second user would swap or unload the model under the first.
 /// Returns why a new job must not start, or `None` when the engine is free.
@@ -283,6 +295,16 @@ mod tests {
 
         acquired_rx.await.unwrap();
         waiter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_try_engine_lifecycle_lock_refuses_while_held() {
+        let guard = acquire_engine_lifecycle_lock().await;
+        assert_eq!(
+            try_engine_lifecycle_lock().err(),
+            Some(ENGINE_LOCK_BUSY.to_string())
+        );
+        drop(guard);
     }
 
     #[test]

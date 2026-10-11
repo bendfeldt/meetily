@@ -765,7 +765,7 @@ pub async fn start_retranscription_command<R: Runtime>(
 ) -> Result<RetranscriptionStarted, String> {
     // Claim the flag before spawning so a recording or import can't start in between
     let guard = {
-        let _engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
+        let _engine_lifecycle_guard = super::common::try_engine_lifecycle_lock()?;
         BatchFlagGuard::claim(
             &RETRANSCRIPTION_IN_PROGRESS,
             "Retranscription already in progress",
