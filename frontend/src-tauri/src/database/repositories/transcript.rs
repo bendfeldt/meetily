@@ -124,16 +124,36 @@ impl TranscriptsRepository {
         let transcript_lower = transcript.to_lowercase();
         let query_lower = query.to_lowercase();
 
-        match transcript_lower.find(&query_lower) {
-            Some(match_index) => {
-                // match_index is a byte offset in the lowercased copy. Where lowercasing
-                // changes byte lengths the window may shift a few bytes, so clamp to the
-                // original and snap to its char boundaries to never slice inside a char.
+        // Offsets found in the lowercased copy are only valid in the original when
+        // lowercasing kept the byte length. Otherwise (e.g. 'İ' grows from 2 to 3 bytes)
+        // scan the original's char boundaries, lowercasing a query-sized window at each.
+        let found = if transcript_lower.len() == transcript.len() {
+            transcript_lower
+                .find(&query_lower)
+                .map(|i| (i, i + query.len()))
+        } else {
+            let window_chars = query_lower.chars().count();
+            transcript.char_indices().find_map(|(i, _)| {
+                let end = transcript[i..]
+                    .char_indices()
+                    .nth(window_chars)
+                    .map_or(transcript.len(), |(j, _)| i + j);
+                transcript[i..end]
+                    .to_lowercase()
+                    .starts_with(&query_lower)
+                    .then_some((i, end))
+            })
+        };
+
+        match found {
+            Some((match_index, match_end)) => {
+                // Clamp and snap to the original's char boundaries so slicing never
+                // lands inside a multi-byte char.
                 let mut start_index = match_index.saturating_sub(100).min(transcript.len());
                 while !transcript.is_char_boundary(start_index) {
                     start_index -= 1;
                 }
-                let mut end_index = (match_index + query.len() + 100).min(transcript.len());
+                let mut end_index = (match_end + 100).min(transcript.len());
                 while !transcript.is_char_boundary(end_index) {
                     end_index += 1;
                 }
@@ -207,10 +227,11 @@ mod tests {
     }
 
     #[test]
-    fn match_context_length_changing_lowercase_does_not_panic() {
-        // 'İ' is 2 bytes but lowercases to 3, shifting offsets in the lowered copy.
-        let transcript = format!("{}hello", "İ".repeat(60));
-        assert!(ctx(&transcript, "hello").contains("hello"));
+    fn match_context_length_changing_lowercase() {
+        // 'İ' is 2 bytes but lowercases to 3, so lowered offsets do not fit the original.
+        let transcript = format!("{}hello", "İ".repeat(300));
+        let expected = format!("...{}hello", "İ".repeat(50));
+        assert_eq!(ctx(&transcript, "hello"), expected);
     }
 
     #[test]
