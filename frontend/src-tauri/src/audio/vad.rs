@@ -158,6 +158,12 @@ impl ContinuousVadProcessor {
 
             // Without a qualifying silence Silero keeps the utterance open indefinitely;
             // deliver it in bounded pieces while it continues.
+            //
+            // Silero's own buffer is not trimmed here: `VadSession::take_until` moves
+            // `speech_start_ms` but not the `start_ms` held in its internal
+            // `VadState::Speech`, which the natural `SpeechEnd` passes to `get_speech`.
+            // SpeechStart at 450ms -> take_until(1050ms) -> next SpeechEnd panics with
+            // "Duration 450ms is outside of session audio range" (silero-rs 26a6460).
             if self.in_speech {
                 if let Some(segment) = split_long_speech(
                     self.session.get_current_speech(),
@@ -358,7 +364,19 @@ impl ContinuousVadProcessor {
                     // Forced splits already delivered the start of the utterance; send only the rest.
                     let emitted = std::mem::take(&mut self.speech_emitted_samples);
                     let speech_samples = if !samples.is_empty() {
-                        samples.get(emitted..).unwrap_or_default().to_vec()
+                        match samples.get(emitted..) {
+                            Some(rest) => rest.to_vec(),
+                            // Silero ends speech at `last speech + post_speech_pad`; a forced
+                            // split taken later in the redemption silence already covers it.
+                            None => {
+                                debug!(
+                                    "VAD: speech end ({} samples) is inside the {} already emitted",
+                                    samples.len(),
+                                    emitted
+                                );
+                                Vec::new()
+                            }
+                        }
                     } else {
                         self.current_speech.clone()
                     };
