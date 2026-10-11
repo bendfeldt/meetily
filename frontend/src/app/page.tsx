@@ -154,7 +154,7 @@ export default function Home() {
       }
     } catch (error) {
       toast.error('Failed to recover meeting', {
-        description: errorText(error),
+        description: errorText(error, 'Unknown error occurred'),
       });
       throw error;
     }

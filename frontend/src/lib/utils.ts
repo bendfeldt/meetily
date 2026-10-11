@@ -33,9 +33,25 @@ export function isOllamaNotInstalledError(errorMessage: string): boolean {
 
 /**
  * Readable text for a caught error. Tauri commands reject with a plain string,
- * not an Error, so `err instanceof Error` alone loses the cause.
+ * not an Error, so `err instanceof Error` alone loses the cause. Never throws.
  */
-export function errorText(err: unknown): string {
-  const text = err instanceof Error ? err.message : err == null ? '' : String(err);
-  return text || 'Unknown error';
+export function errorText(err: unknown, fallback = 'Unknown error'): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err || fallback;
+  if (err == null) return fallback;
+  const message = (err as { message?: unknown }).message;
+  if (typeof message === 'string' && message) return message;
+  try {
+    const text = String(err);
+    if (text && !text.startsWith('[object ')) return text;
+  } catch {
+    // e.g. a null-prototype object has no toString
+  }
+  try {
+    const json = JSON.stringify(err);
+    if (json && json !== '{}') return json;
+  } catch {
+    // e.g. a cyclic object
+  }
+  return fallback;
 }
