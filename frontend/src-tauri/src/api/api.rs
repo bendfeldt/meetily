@@ -768,17 +768,53 @@ pub async fn api_delete_api_key<R: Runtime>(
     }
 }
 
-/// Returns the canonical folder if it is a directory strictly inside `root`
-/// (symlinks and `..` are resolved first, so they cannot escape the root).
-fn folder_inside_root(folder: &Path, root: &Path) -> Option<PathBuf> {
-    let folder = folder.canonicalize().ok()?;
-    let root = root.canonicalize().ok()?;
-    (folder != root && folder.starts_with(&root) && folder.is_dir()).then_some(folder)
+/// Resolves an absolute `folder` (symlinks and `..` included) and returns it
+/// if it is a directory strictly inside `root`; otherwise the reason it is not
+/// removable. Reasons never contain paths.
+fn folder_inside_root(folder: &Path, root: &Path) -> Result<PathBuf, String> {
+    if !folder.is_absolute() {
+        return Err("folder path is empty or relative".to_string());
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("recordings folder not resolvable ({})", e.kind()))?;
+    let folder = folder.canonicalize().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => "folder is missing".to_string(),
+        kind => format!("folder not resolvable ({})", kind),
+    })?;
+    if folder == root || !folder.starts_with(&root) {
+        return Err("folder is outside the recordings folder".to_string());
+    }
+    if !folder.is_dir() {
+        return Err("folder path is not a directory".to_string());
+    }
+    Ok(folder)
+}
+
+/// True if any other meeting's folder (after resolving it) is `dir`, is
+/// inside `dir`, or contains `dir`. Unresolvable paths are ignored.
+fn folder_shared(dir: &Path, other_folders: &[String]) -> bool {
+    // macOS and Windows file systems are usually case-insensitive.
+    let norm = |p: &Path| -> PathBuf {
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            PathBuf::from(p.to_string_lossy().to_lowercase())
+        } else {
+            p.to_path_buf()
+        }
+    };
+    let dir = norm(dir);
+    other_folders
+        .iter()
+        .map(Path::new)
+        .filter(|p| p.is_absolute())
+        .filter_map(|p| p.canonicalize().ok())
+        .map(|p| norm(&p))
+        .any(|other| other.starts_with(&dir) || dir.starts_with(&other))
 }
 
 /// Deletes the meeting's rows, then its recording folder when that folder is
-/// inside `recordings_root` and no other meeting uses it. A failed folder
-/// removal is logged and does not fail the delete.
+/// inside `recordings_root` and no other meeting uses it. A failed or skipped
+/// folder removal is logged and does not fail the delete.
 async fn delete_meeting_and_folder(
     pool: &SqlitePool,
     meeting_id: &str,
@@ -790,38 +826,43 @@ async fn delete_meeting_and_folder(
             .fetch_optional(pool)
             .await?
             .flatten();
-    let shared: i64 = match &folder {
-        Some(f) => {
-            sqlx::query_scalar("SELECT COUNT(*) FROM meetings WHERE folder_path = ? AND id != ?")
-                .bind(f)
-                .bind(meeting_id)
-                .fetch_one(pool)
-                .await?
-        }
-        None => 0,
-    };
+    let other_folders: Vec<String> = sqlx::query_scalar(
+        "SELECT folder_path FROM meetings WHERE id != ? AND folder_path IS NOT NULL",
+    )
+    .bind(meeting_id)
+    .fetch_all(pool)
+    .await?;
 
     if !MeetingsRepository::delete_meeting(pool, meeting_id).await? {
         return Ok(false);
     }
 
     let Some(folder) = folder else {
+        log_debug!("Meeting {} had no recording folder", meeting_id);
         return Ok(true);
     };
-    match folder_inside_root(Path::new(&folder), recordings_root) {
-        Some(dir) if shared == 0 => {
-            if let Err(e) = std::fs::remove_dir_all(&dir) {
-                log_warn!(
-                    "Could not remove recording folder of meeting {}: {}",
-                    meeting_id,
-                    e.kind()
-                );
-            }
+    let dir = match folder_inside_root(Path::new(&folder), recordings_root) {
+        Ok(dir) => dir,
+        Err(reason) => {
+            log_warn!(
+                "Kept recording folder of meeting {}: {}",
+                meeting_id,
+                reason
+            );
+            return Ok(true);
         }
-        _ => log_warn!(
-            "Kept recording folder of meeting {} (shared, missing or outside the recordings folder)",
+    };
+    if folder_shared(&dir, &other_folders) {
+        log_warn!(
+            "Kept recording folder of meeting {}: used by another meeting",
             meeting_id
-        ),
+        );
+    } else if let Err(e) = std::fs::remove_dir_all(&dir) {
+        log_warn!(
+            "Could not remove recording folder of meeting {}: {}",
+            meeting_id,
+            e.kind()
+        );
     }
     Ok(true)
 }
@@ -1478,11 +1519,15 @@ mod tests {
     }
 
     async fn add_meeting(pool: &SqlitePool, id: &str, folder: &Path) {
+        add_meeting_raw(pool, id, Some(&folder.to_string_lossy())).await;
+    }
+
+    async fn add_meeting_raw(pool: &SqlitePool, id: &str, folder_path: Option<&str>) {
         sqlx::query(
             "INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 't', datetime('now'), datetime('now'), ?)",
         )
         .bind(id)
-        .bind(folder.to_string_lossy().to_string())
+        .bind(folder_path)
         .execute(pool)
         .await
         .unwrap();
@@ -1498,21 +1543,26 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
 
         assert_eq!(
-            folder_inside_root(&meeting, &root),
+            folder_inside_root(&meeting, &root).ok(),
             Some(meeting.canonicalize().unwrap())
         );
-        assert_eq!(folder_inside_root(&root, &root), None);
-        assert_eq!(folder_inside_root(&outside, &root), None);
-        assert_eq!(folder_inside_root(&root.join("missing"), &root), None);
+        assert_eq!(folder_inside_root(&root, &root).ok(), None);
+        assert_eq!(folder_inside_root(&outside, &root).ok(), None);
+        assert_eq!(folder_inside_root(&root.join("missing"), &root).ok(), None);
         assert_eq!(
-            folder_inside_root(&root.join("Meeting 1/../../elsewhere"), &root),
+            folder_inside_root(&root.join("Meeting 1/../../elsewhere"), &root).ok(),
+            None
+        );
+        assert_eq!(folder_inside_root(Path::new(""), &root).ok(), None);
+        assert_eq!(
+            folder_inside_root(Path::new("recordings"), &root).ok(),
             None
         );
         #[cfg(unix)]
         {
             let link = root.join("link");
             std::os::unix::fs::symlink(&outside, &link).unwrap();
-            assert_eq!(folder_inside_root(&link, &root), None);
+            assert_eq!(folder_inside_root(&link, &root).ok(), None);
         }
     }
 
@@ -1551,5 +1601,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 1);
+    }
+
+    #[tokio::test]
+    async fn null_empty_or_relative_folder_path_removes_nothing() {
+        let pool = db().await;
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("recordings");
+        let own = root.join("own");
+        std::fs::create_dir_all(&own).unwrap();
+
+        // A relative path that resolves to `own` from the current directory.
+        let cwd = std::env::current_dir().unwrap();
+        let ups = "../".repeat(cwd.components().count() - 1);
+        let abs = own.to_string_lossy().to_string();
+        let relative = format!("{}{}", ups, abs.trim_start_matches('/'));
+        assert_eq!(
+            Path::new(&relative).canonicalize().unwrap(),
+            own.canonicalize().unwrap()
+        );
+
+        add_meeting_raw(&pool, "null", None).await;
+        add_meeting_raw(&pool, "empty", Some("")).await;
+        add_meeting_raw(&pool, "blank", Some("   ")).await;
+        add_meeting_raw(&pool, "relative", Some(&relative)).await;
+        for id in ["null", "empty", "blank", "relative"] {
+            assert!(delete_meeting_and_folder(&pool, id, &root).await.unwrap());
+        }
+        assert!(own.exists(), "relative folder_path must not be resolved");
+        assert!(root.exists());
+    }
+
+    #[tokio::test]
+    async fn folder_used_by_another_meeting_under_a_different_spelling_is_kept() {
+        let pool = db().await;
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("recordings");
+        let slash = root.join("slash");
+        let parent = root.join("parent");
+        let child = root.join("child");
+        for dir in [&slash, &parent.join("nested"), &child.join("sub")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+
+        // Same folder with a trailing separator.
+        add_meeting(&pool, "s1", &slash).await;
+        add_meeting_raw(&pool, "s2", Some(&format!("{}/", slash.display()))).await;
+        assert!(delete_meeting_and_folder(&pool, "s1", &root).await.unwrap());
+        assert!(slash.exists(), "same folder spelled with a trailing slash");
+
+        // Another meeting's folder is nested inside this one.
+        add_meeting(&pool, "p1", &parent).await;
+        add_meeting(&pool, "p2", &parent.join("nested")).await;
+        assert!(delete_meeting_and_folder(&pool, "p1", &root).await.unwrap());
+        assert!(parent.join("nested").exists(), "nested meeting folder");
+
+        // This folder is nested inside another meeting's folder.
+        add_meeting(&pool, "c1", &child.join("sub")).await;
+        add_meeting(&pool, "c2", &child).await;
+        assert!(delete_meeting_and_folder(&pool, "c1", &root).await.unwrap());
+        assert!(
+            child.join("sub").exists(),
+            "folder inside another meeting's"
+        );
+
+        #[cfg(unix)]
+        {
+            let real = root.join("real");
+            let alias = root.join("alias");
+            std::fs::create_dir_all(&real).unwrap();
+            std::os::unix::fs::symlink(&real, &alias).unwrap();
+            add_meeting(&pool, "a1", &real).await;
+            add_meeting(&pool, "a2", &alias).await;
+            assert!(delete_meeting_and_folder(&pool, "a1", &root).await.unwrap());
+            assert!(real.exists(), "same folder reached through a symlink");
+        }
     }
 }
