@@ -266,15 +266,28 @@ impl RecordingState {
     pub fn report_error(&self, error: AudioError) {
         let count = self.error_count.fetch_add(1, Ordering::SeqCst) + 1;
 
+        // Only log and notify when the error kind changes: a dead stream can
+        // fail on every audio callback, and we no longer stop on a count.
+        let mut last_error = self.last_error.lock().unwrap();
+        let is_new = last_error.as_ref().map_or(true, |last| {
+            std::mem::discriminant(last) != std::mem::discriminant(&error)
+        });
+        *last_error = Some(error.clone());
+        drop(last_error);
+
         // Track recoverable vs non-recoverable errors separately
         if error.is_recoverable() {
+            // Keep recording: the device monitor / mic fallback handles
+            // disconnects, and stopping here left the UI showing a live
+            // recording that captured nothing.
             let recoverable_count = self.recoverable_error_count.fetch_add(1, Ordering::SeqCst) + 1;
-            log::warn!("Recoverable audio error ({}): {:?}", recoverable_count, error);
-
-            // Allow more recoverable errors before stopping
-            if recoverable_count >= 10 {
-                log::error!("Too many recoverable errors ({}), stopping recording", recoverable_count);
-                self.stop_recording();
+            if is_new {
+                log::warn!(
+                    "Recoverable audio error ({} of {} total): {:?}",
+                    recoverable_count,
+                    count,
+                    error
+                );
             }
         } else {
             log::error!("Non-recoverable audio error: {:?}", error);
@@ -282,17 +295,11 @@ impl RecordingState {
             self.stop_recording();
         }
 
-        *self.last_error.lock().unwrap() = Some(error.clone());
-
         // Call error callback if set
-        if let Some(callback) = self.error_callback.lock().unwrap().as_ref() {
-            callback(&error);
-        }
-
-        // Fallback: stop recording after too many total errors
-        if count >= 15 {
-            log::error!("Too many total audio errors ({}), stopping recording", count);
-            self.stop_recording();
+        if is_new {
+            if let Some(callback) = self.error_callback.lock().unwrap().as_ref() {
+                callback(&error);
+            }
         }
     }
 
@@ -414,5 +421,42 @@ impl Clone for RecordingStats {
             total_duration: self.total_duration,
             last_activity: self.last_activity,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recoverable_errors_do_not_stop_recording() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+
+        for _ in 0..20 {
+            state.report_error(AudioError::DeviceDisconnected);
+        }
+
+        assert!(state.is_recording());
+        assert_eq!(state.get_error_count(), 20);
+        assert_eq!(state.get_recoverable_error_count(), 20);
+    }
+
+    #[test]
+    fn repeated_error_notifies_once_per_kind() {
+        let state = RecordingState::new();
+        state.start_recording().unwrap();
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_in_cb = calls.clone();
+        state.set_error_callback(move |_| {
+            calls_in_cb.fetch_add(1, Ordering::SeqCst);
+        });
+
+        for _ in 0..5 {
+            state.report_error(AudioError::ProcessingFailed);
+        }
+        state.report_error(AudioError::StreamFailed);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

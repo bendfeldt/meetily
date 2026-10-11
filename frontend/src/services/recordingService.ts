@@ -240,6 +240,17 @@ export class RecordingService {
       callback(event.payload);
     });
   }
+
+  /**
+   * Listen for recording-error event (audio stream error during recording)
+   * @param callback - Function to call with the user-facing error message
+   * @returns Promise that resolves to unlisten function
+   */
+  async onRecordingError(callback: (message: string) => void): Promise<UnlistenFn> {
+    return listen<string>('recording-error', (event) => {
+      callback(event.payload);
+    });
+  }
 }
 
 // Export singleton instance

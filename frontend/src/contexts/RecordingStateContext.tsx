@@ -256,6 +256,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
     let unlistenFailed: (() => void) | undefined;
     let unlistenMicUnavailable: (() => void) | undefined;
     let unlistenExhausted: (() => void) | undefined;
+    let unlistenRecordingError: (() => void) | undefined;
 
     const setup = async () => {
       try {
@@ -312,6 +313,17 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         });
         if (cancelled) { fnExhausted(); return; }
         unlistenExhausted = fnExhausted;
+
+        const fnRecordingError = await recordingService.onRecordingError((message) => {
+          console.error('[RecordingStateContext] recording-error →', message);
+          // Backend sends one event per new error kind; gate like the other
+          // mid-recording toasts so a stale event after Stop stays quiet.
+          if (isRecordingRef.current) {
+            toast.error(message, { duration: 8000 });
+          }
+        });
+        if (cancelled) { fnRecordingError(); return; }
+        unlistenRecordingError = fnRecordingError;
       } catch (e) {
         console.error('[RecordingStateContext] Failed to set up hot-swap listeners:', e);
       }
@@ -325,6 +337,7 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       unlistenFailed?.();
       unlistenMicUnavailable?.();
       unlistenExhausted?.();
+      unlistenRecordingError?.();
     };
   }, []);
 
