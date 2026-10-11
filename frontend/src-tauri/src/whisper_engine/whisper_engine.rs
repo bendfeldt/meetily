@@ -430,6 +430,8 @@ impl WhisperEngine {
     // Check for obviously meaningless patterns
     fn is_meaningless_output(text: &str) -> bool {
         let text_lower = text.to_lowercase();
+        // Match the whole output ("[Applause]", "Thank you for watching."), not phrases inside speech
+        let text_lower = text_lower.trim_matches(|c: char| !c.is_alphanumeric());
 
         // Check for common meaningless patterns
         let meaningless_patterns = [
@@ -445,7 +447,7 @@ impl WhisperEngine {
         ];
 
         for pattern in &meaningless_patterns {
-            if text_lower.contains(pattern) {
+            if text_lower == *pattern {
                 return true;
             }
         }
@@ -1684,5 +1686,24 @@ mod tests {
         assert!(!model_path.exists());
         let models = engine.discover_models().await.unwrap();
         assert!(matches!(tiny_model(&models).status, ModelStatus::Missing));
+    }
+
+    #[test]
+    fn meaningless_filter_keeps_speech_that_mentions_a_filler_phrase() {
+        assert!(!WhisperEngine::is_meaningless_output(
+            "Let's give Sarah a round of applause, she closed the Q3 deal, and next we review the budget"
+        ));
+    }
+
+    #[test]
+    fn meaningless_filter_drops_standalone_filler_phrases() {
+        for text in [
+            "[Applause]",
+            "Thank you for watching.",
+            "(Laughter)",
+            "♪ music playing ♪",
+        ] {
+            assert!(WhisperEngine::is_meaningless_output(text), "{text}");
+        }
     }
 }
