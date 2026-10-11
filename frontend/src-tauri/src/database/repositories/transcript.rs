@@ -125,12 +125,17 @@ impl TranscriptsRepository {
         let query_lower = query.to_lowercase();
 
         // Offsets found in the lowercased copy are only valid in the original when
-        // lowercasing kept the byte length. Otherwise (e.g. 'İ' grows from 2 to 3 bytes)
-        // scan the original's char boundaries, lowercasing a query-sized window at each.
-        let found = if transcript_lower.len() == transcript.len() {
+        // lowercasing keeps every char's byte length (true for ASCII; checking only
+        // the total misses offsetting changes such as the Kelvin sign plus 'İ').
+        // Otherwise scan the original's char boundaries, lowercasing a query-sized
+        // window at each.
+        let same_offsets = transcript
+            .chars()
+            .all(|c| c.to_lowercase().map(char::len_utf8).sum::<usize>() == c.len_utf8());
+        let found = if same_offsets {
             transcript_lower
                 .find(&query_lower)
-                .map(|i| (i, i + query.len()))
+                .map(|i| (i, i + query_lower.len()))
         } else {
             let window_chars = query_lower.chars().count();
             transcript.char_indices().find_map(|(i, _)| {
@@ -239,5 +244,13 @@ mod tests {
         let transcript = format!("{}Hello{}", "a".repeat(150), "b".repeat(150));
         let expected = format!("...{}Hello{}...", "a".repeat(100), "b".repeat(100));
         assert_eq!(ctx(&transcript, "hello"), expected);
+    }
+    #[test]
+    fn match_context_offsetting_length_changes() {
+        // Kelvin sign shrinks (3 -> 1 byte) and 'İ' grows (2 -> 3) when lowercased:
+        // equal total length, but offsets after them shift.
+        let transcript = format!("{}hello{}", "\u{212A}".repeat(60), "İ".repeat(120));
+        let snippet = TranscriptsRepository::get_match_context(&transcript, "hello");
+        assert!(snippet.contains("hello"), "snippet must contain the match");
     }
 }
