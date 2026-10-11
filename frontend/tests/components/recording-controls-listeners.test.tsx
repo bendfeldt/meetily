@@ -40,22 +40,25 @@ mock.module('../../src/components/ui/tooltip', () => ({
 const { RecordingControls } = await import('../../src/components/RecordingControls');
 
 let renderer: ReactTestRenderer | undefined;
-const stops: unknown[] = [];
-const errors: string[] = [];
+let stops: unknown[] = [];
+let errors: string[] = [];
 async function show() {
-  // New inline arrows every render, exactly like page.tsx passes them.
+  // New inline arrows every render, exactly like page.tsx passes them; each
+  // render's callbacks write into their own arrays so stale ones are visible.
+  const renderStops: unknown[] = (stops = []);
+  const renderErrors: string[] = (errors = []);
   const view = (
     <RecordingControls
       isRecording barHeights={[]} isRecordingDisabled={false} isParentProcessing={false}
       onRecordingStart={() => {}} onTranscriptReceived={() => {}}
-      onRecordingStop={(callApi = true) => { stops.push(callApi); }}
-      onTranscriptionError={message => { errors.push(message); }}
+      onRecordingStop={(callApi = true) => { renderStops.push(callApi); }}
+      onTranscriptionError={message => { renderErrors.push(message); }}
     />
   );
   await act(async () => { if (renderer) renderer.update(view); else renderer = create(view); });
 }
 
-beforeEach(() => { handlers.clear(); listen.mockClear(); stops.length = 0; errors.length = 0; pending = null; });
+beforeEach(() => { handlers.clear(); listen.mockClear(); pending = null; });
 afterEach(async () => {
   if (renderer) await act(async () => renderer!.unmount());
   renderer = undefined;
@@ -80,14 +83,35 @@ describe('RecordingControls event listeners', () => {
     expect(active()).toBe(0);
   });
 
+  test('only the latest render callbacks are called', async () => {
+    await show();
+    const firstErrors = errors;
+    await show();
+    await act(async () => { emit('transcript-error', 'legacy failure'); });
+    expect(firstErrors).toEqual([]);
+    expect(errors).toEqual(['legacy failure']);
+  });
+
   test('a per-chunk transcription error does not stop the recording UI', async () => {
     await show();
-    await show(); // callbacks used must be the latest ones
+    const firstStops = stops;
+    await show();
     await act(async () => {
       emit('transcription-error', { error: 'chunk failed', userMessage: 'Transcription failed', actionable: false, phase: 'active' });
       emit('transcript-error', 'legacy failure');
     });
+    expect(firstStops).toEqual([]);
     expect(stops).toEqual([]);
-    expect(errors).toEqual(['legacy failure']);
+  });
+
+  test('a fatal engine-init transcription error still stops the recording UI', async () => {
+    await show();
+    const firstStops = stops;
+    await show();
+    await act(async () => {
+      emit('transcription-error', { error: 'init failed', userMessage: 'Recording failed', actionable: true, phase: 'active' });
+    });
+    expect(firstStops).toEqual([]);
+    expect(stops).toEqual([false]);
   });
 });

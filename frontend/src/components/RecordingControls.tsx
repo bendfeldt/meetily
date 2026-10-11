@@ -245,8 +245,10 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     };
   }, []);
 
-  // page.tsx passes a new arrow every render; read it through a ref so the
+  // page.tsx passes new arrows every render; read them through refs so the
   // listeners below are registered once instead of on every re-render.
+  const onRecordingStopRef = useRef(onRecordingStop);
+  onRecordingStopRef.current = onRecordingStop;
   const onTranscriptionErrorRef = useRef(onTranscriptionError);
   onTranscriptionErrorRef.current = onTranscriptionError;
 
@@ -296,8 +298,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
           });
           setIsProcessing(false);
 
-          // Rust emits 'active' errors for a single failed chunk (or a failed
-          // engine init) and keeps recording, so the UI must not stop here.
+          // A failed chunk (actionable: false) leaves recording running, so only
+          // report it. Engine init failure (actionable: true) ends transcription
+          // for the rest of the recording: keep stopping the UI for that case.
+          if (event.payload.phase === 'active' && event.payload.actionable) {
+            console.log('Calling onRecordingStop(false) due to transcription engine failure');
+            onRecordingStopRef.current(false);
+          }
+
           // For actionable errors (like model loading failures), the main page will handle showing the model selector
           // For regular errors, they are handled by useModalState global listener which shows a toast
         });
