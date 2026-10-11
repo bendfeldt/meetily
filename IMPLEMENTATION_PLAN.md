@@ -78,6 +78,11 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 
 ## Evidence gaps
 
+- Obsidian export of a meeting whose summary is stored without Markdown
+  (older upstream format, or an editor save whose Markdown conversion
+  failed) fails with a message to re-save or regenerate the summary,
+  so an existing note never loses its summary on sync.
+
 - Obsidian export not exercised in the running app (no desktop session):
   folder picker, button, toast, and sync after summary/title changes are
   covered only by unit tests of the pure parts.

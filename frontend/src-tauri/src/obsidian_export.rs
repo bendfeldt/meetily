@@ -101,6 +101,23 @@ pub fn summary_markdown(summary: &Value) -> Option<String> {
     (!markdown.is_empty()).then(|| markdown.to_string())
 }
 
+/// The note's summary from the stored `summary_processes.result`. A summary
+/// stored without Markdown (legacy sections, or an editor save whose Markdown
+/// conversion failed), or unreadable JSON, fails the export rather than
+/// erasing the summary from an existing note.
+fn note_summary(stored: Option<&str>) -> anyhow::Result<Option<String>> {
+    let Some(result) = stored else {
+        return Ok(None);
+    };
+    let value: Value = serde_json::from_str(result)?;
+    if value.get("markdown").and_then(Value::as_str).is_none() {
+        anyhow::bail!(
+            "the summary is stored without Markdown (older format, or an editor save that could not be converted); re-save or regenerate the summary to export it"
+        );
+    }
+    Ok(summary_markdown(&value))
+}
+
 pub fn render_markdown(note: &NoteInput) -> String {
     // meetily_id first: find_note only reads the start of each file.
     let mut out = format!("---\nmeetily_id: {}\n", yaml_string(&note.meeting_id));
@@ -234,17 +251,7 @@ async fn load_note(pool: &SqlitePool, meeting_id: &str) -> anyhow::Result<NoteIn
     let stored = SummaryProcessesRepository::get_summary_data_for_meeting(pool, meeting_id)
         .await?
         .and_then(|process| process.result);
-    // An unreadable summary, or one without Markdown (legacy sections, or an
-    // editor save whose Markdown conversion failed), fails the export rather
-    // than erasing the summary from an existing note.
-    let summary_markdown = match stored {
-        Some(result) => Some(
-            summary_markdown(&serde_json::from_str::<Value>(&result)?).ok_or_else(|| {
-                anyhow::anyhow!("the summary has no Markdown version; re-save or regenerate it")
-            })?,
-        ),
-        None => None,
-    };
+    let summary_markdown = note_summary(stored.as_deref())?;
     let mut transcript: Vec<Segment> = meeting
         .transcripts
         .into_iter()
@@ -448,6 +455,21 @@ mod tests {
         let md = render_markdown(&note("T"));
         assert!(!md.contains("## Summary"));
         assert_eq!(summary_markdown(&json!({"markdown": "  "})), None);
+    }
+
+    #[test]
+    fn note_summary_fails_instead_of_erasing() {
+        assert_eq!(note_summary(None).unwrap(), None);
+        assert_eq!(note_summary(Some(r#"{"markdown":"  "}"#)).unwrap(), None);
+        assert_eq!(
+            note_summary(Some(r##"{"markdown":"# Hi"}"##))
+                .unwrap()
+                .as_deref(),
+            Some("# Hi")
+        );
+        assert!(note_summary(Some(r#"{"summary_json":[]}"#)).is_err());
+        assert!(note_summary(Some(r#"{"_section_order":["A"]}"#)).is_err());
+        assert!(note_summary(Some("not json")).is_err());
     }
 
     #[test]
