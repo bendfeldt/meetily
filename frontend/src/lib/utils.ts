@@ -36,22 +36,22 @@ export function isOllamaNotInstalledError(errorMessage: string): boolean {
  * not an Error, so `err instanceof Error` alone loses the cause. Never throws.
  */
 export function errorText(err: unknown, fallback = 'Unknown error'): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'string') return err || fallback;
-  if (err == null) return fallback;
-  const message = (err as { message?: unknown }).message;
-  if (typeof message === 'string' && message) return message;
   try {
-    const text = String(err);
-    if (text && !text.startsWith('[object ')) return text;
-  } catch {
-    // e.g. a null-prototype object has no toString
-  }
-  try {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'string') return err || fallback;
+    if (err == null) return fallback;
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === 'string' && message) return message;
+    try {
+      const text = String(err);
+      if (text && !text.startsWith('[object ')) return text;
+    } catch {
+      // e.g. a null-prototype object has no toString
+    }
     const json = JSON.stringify(err);
     if (json && json !== '{}') return json;
   } catch {
-    // e.g. a cyclic object
+    // e.g. a throwing getter, a Proxy or a cyclic object
   }
   return fallback;
 }

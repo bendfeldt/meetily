@@ -35,6 +35,11 @@ describe('errorText', () => {
     expect(errorText(cyclic)).toBe('Unknown error');
   });
 
+  test('falls back when reading the error throws', () => {
+    const hostile = { get message(): string { throw new Error('boom'); } };
+    expect(errorText(hostile)).toBe('Unknown error');
+  });
+
   test('accepts a caller fallback', () => {
     expect(errorText(undefined, 'Unknown error occurred')).toBe('Unknown error occurred');
   });
