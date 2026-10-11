@@ -140,6 +140,12 @@ export function useModalState(transcriptModelConfig?: TranscriptModelProps): Use
           if (actionable) {
             // This is a model-related error that requires user action
             showModal('modelSelector', userMessage);
+          } else if (event.payload.phase === 'shutdown') {
+            // Stop finished but transcription is still catching up
+            toast.warning('', {
+              description: userMessage,
+              duration: 5000,
+            });
           } else {
             // Show toast instead of modal for non-actionable errors (consistent with sidebar)
             toast.error('', {
