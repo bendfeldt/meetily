@@ -67,8 +67,11 @@ impl IncrementalAudioSaver {
 
         // Save checkpoint when buffer reaches threshold (30 seconds)
         if total_samples >= self.checkpoint_interval_samples {
-            self.save_checkpoint()?;
+            // Clear even on failure: one checkpoint is lost, but the buffer
+            // can't grow without bound while saving keeps failing.
+            let result = self.save_checkpoint();
             self.checkpoint_buffer.clear();
+            result?;
         }
 
         Ok(())
@@ -452,6 +455,30 @@ mod tests {
 
         // Verify checkpoints directory deleted
         assert!(!meeting_folder.join(".checkpoints").exists());
+    }
+
+    #[test]
+    fn test_failed_checkpoint_clears_buffer() {
+        let temp_dir = tempdir().unwrap();
+        let meeting_folder = temp_dir.path().join("Failing_Test");
+        std::fs::create_dir_all(meeting_folder.join(".checkpoints")).unwrap();
+
+        // 10 Hz => checkpoint every 300 samples
+        let mut saver = IncrementalAudioSaver::new(meeting_folder.clone(), 10).unwrap();
+
+        // Remove the checkpoints dir so the save fails (with or without FFmpeg)
+        std::fs::remove_dir_all(meeting_folder.join(".checkpoints")).unwrap();
+
+        let chunk = AudioChunk {
+            data: vec![0.5f32; 300],
+            sample_rate: 10,
+            timestamp: 0.0,
+            chunk_id: 0,
+            device_type: DeviceType::Microphone,
+        };
+        assert!(saver.add_chunk(chunk).is_err());
+        assert!(saver.checkpoint_buffer.is_empty());
+        assert_eq!(saver.checkpoint_count, 0);
     }
 
     #[tokio::test]
