@@ -81,7 +81,12 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 - Obsidian export of a meeting whose summary is stored without Markdown
   (older upstream format, or an editor save whose Markdown conversion
   failed) fails with a message to re-save or regenerate the summary,
-  so an existing note never loses its summary on sync.
+  so an existing note never loses its summary on sync (a background sync
+  only logs a warning, the note stays as it was). A stored summary whose
+  Markdown is empty after cleaning is treated as no summary.
+- If the Teams pop-up panel cannot be created at startup, a notification
+  is shown only when "Ask to record Teams meetings" is on; otherwise it is
+  only logged.
 
 - Obsidian export not exercised in the running app (no desktop session):
   folder picker, button, toast, and sync after summary/title changes are

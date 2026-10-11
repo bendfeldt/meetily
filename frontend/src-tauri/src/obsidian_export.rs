@@ -92,7 +92,6 @@ fn timestamp(seconds: f64) -> String {
 
 /// Markdown of a stored summary (`summary_processes.result`), from its
 /// `markdown` field.
-// shortcut: summaries without `markdown` (legacy sections, BlockNote-only) fail the export, convert them if old meetings need exporting
 pub fn summary_markdown(summary: &Value) -> Option<String> {
     let markdown = summary.get("markdown").and_then(Value::as_str)?;
     // Same cleaning as the meeting page: strips model reasoning envelopes.
@@ -104,7 +103,9 @@ pub fn summary_markdown(summary: &Value) -> Option<String> {
 /// The note's summary from the stored `summary_processes.result`. A summary
 /// stored without Markdown (legacy sections, or an editor save whose Markdown
 /// conversion failed), or unreadable JSON, fails the export rather than
-/// erasing the summary from an existing note.
+/// erasing the summary from an existing note. A `markdown` that is empty
+/// after cleaning is an empty summary, rendered as no Summary section.
+// shortcut: summaries without `markdown` (legacy sections, BlockNote-only) fail the export (sync only logs a warning), convert them if old meetings need exporting
 fn note_summary(stored: Option<&str>) -> anyhow::Result<Option<String>> {
     let Some(result) = stored else {
         return Ok(None);

@@ -126,9 +126,10 @@ the loopkit skills; the condensed review log is at the end.
   | Prompting | released ≥ 5 s | Idle | hide_prompt |
   | Starting | start_ok | Recording (if released ≥ 5 s meanwhile: Stopping + stop) | – |
   | Starting | start_failed | Dismissed | notify reason |
-  | Recording | released ≥ 5 s | Stopping | stop |
+  | Recording | released ≥ 5 s, or recording ≥ 4 h (`MAX_RECORDING`) | Stopping | stop |
   | Recording | !recording_active (user or fallback stopped it) | Dismissed | – |
-  | Stopping | stop_done / stop_failed | Idle (Dismissed if held again) | notify on failure |
+  | Stopping | stop_done | Idle (a still-held mic prompts again) | – |
+  | Stopping | stop_failed | Recording (retry after another end grace or 4 h) | notify once |
   | Dismissed | released ≥ 5 s | Idle | – |
   | any | feature_off | Idle | hide_prompt; a running pop-up recording continues as a normal recording (no auto-stop) |
   | any | record / dismiss outside Prompting | unchanged | – (late click) |

@@ -340,7 +340,7 @@ mod tests {
         ));
         assert!(matches!(
             classify(&err("No speech detected in audio file".into())),
-            Outcome::Failed(_)
+            Outcome::Failed(m) if m.ends_with("(the meeting and its audio were kept)")
         ));
         assert!(matches!(
             classify(&err("decoder exploded".into())),

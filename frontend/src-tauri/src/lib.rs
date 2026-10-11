@@ -531,14 +531,17 @@ pub fn run() {
                     Ok(()) => meeting_detector::start(handle.clone()),
                     Err(e) => {
                         log::error!("Teams meeting pop-up unavailable: {}", e);
-                        if let Err(e) = handle
-                            .notification()
-                            .builder()
-                            .title("meetily")
-                            .body("The Teams meeting pop-up could not start; see the log.")
-                            .show()
-                        {
-                            log::error!("Cannot show notification: {}", e);
+                        // Only users who turned the pop-up on are told.
+                        if fork_settings::load(handle).teams_prompt_enabled {
+                            if let Err(e) = handle
+                                .notification()
+                                .builder()
+                                .title("meetily")
+                                .body("The Teams meeting pop-up could not start; see the log.")
+                                .show()
+                            {
+                                log::error!("Cannot show notification: {}", e);
+                            }
                         }
                     }
                 }
