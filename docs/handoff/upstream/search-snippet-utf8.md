@@ -139,3 +139,11 @@ N/A
 - In the slow path, `str::to_lowercase` on a short window treats a 'Σ' at the window's end as final sigma. A query that is mixed-case Greek and also includes a length-changing char could miss a match. This is an edge case of an edge case and was not tested.
 - In the fast path, if one char grows and another shrinks by the same amount (e.g. 'İ' plus the Kelvin sign 'K'), the byte length is equal but offsets shift. The snippet is then slightly off, but it cannot panic.
 - The SQLite ASCII-only LOWER is left as it is, as instructed.
+
+## Final commit (coordinator)
+`0c90577` fix(search): use the fast path only when char lengths are preserved.
+The fast path now requires every char to keep its byte length when
+lowercased (the total-length check missed Kelvin sign + 'İ' offsetting each
+other). Test `match_context_offsetting_length_changes` failed before, passes
+now; `cargo test -- match_context` 10 passed; `cargo check --all-targets` OK.
+Squash the four commits for the upstream PR.

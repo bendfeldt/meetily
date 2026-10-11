@@ -98,9 +98,3 @@ https://claude.ai/code/session_014xnK9q3eoz3HD4vE1Kr9Lh
 - Only Linux unit tests ran. There was no live recording, transcription or macOS test.
 - Filler appended to real speech is now kept. This is the intended trade-off.
 - "um um um um" (four times) leaves one "um" after phrase removal, so the filler rule does not drop it. The unchanged unique-chars rule still drops it, because it has 3 unique chars and is 11 bytes long.
-
-## Note added by the coordinator (final review)
-The pre-existing "few unique characters" rule in `is_meaningless_output`
-(unchanged by this PR) still drops very repetitive short speech such as
-"No no no no" or "はいはいはい". It exists on devtest today; mention it in the
-PR as a known limit or a possible follow-up.
