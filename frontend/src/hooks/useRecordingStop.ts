@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import { useTranscripts } from '@/contexts/TranscriptContext';
 import { useSidebar } from '@/components/Sidebar/SidebarProvider';
@@ -136,6 +137,25 @@ export function useRecordingStop(
     const stopStartTime = Date.now();
 
     try {
+      // Fork (bendfeldt/meetily): a record-only recording is saved and
+      // transcribed by the Rust after-meeting worker; nothing to save here.
+      // shortcut: if this query fails, a record-only recording is also saved here (duplicate meeting, no data loss); retry the query if that shows up
+      if (isCallApi && await invoke<boolean>('last_recording_was_record_only').catch((error) => {
+        console.error('Could not ask whether the recording was record-only:', error);
+        return false;
+      })) {
+        await markMeetingAsSaved();
+        sessionStorage.removeItem('last_recording_folder_path');
+        sessionStorage.removeItem('last_recording_meeting_name');
+        sessionStorage.removeItem('indexeddb_current_meeting_id');
+        clearTranscripts();
+        setStatus(RecordingStatus.IDLE);
+        setIsMeetingActive(false);
+        setIsRecordingDisabled(false);
+        toast.info('Recording saved, transcribing in the background');
+        return;
+      }
+
       console.log('Post-stop processing (new implementation)...', {
         stop_initiated_at: new Date(stopStartTime).toISOString(),
         current_transcript_count: transcriptsRef.current.length
@@ -263,6 +283,30 @@ export function useRecordingStop(
           if (!meetingId) {
             console.error('No meeting_id in response:', responseData);
             throw new Error('No meeting ID received from save operation');
+          }
+
+          // Fork (bendfeldt/meetily): delete recordings without speech. Rust
+          // decides from what it saw during the recording, not this snapshot.
+          const discarded = await invoke<boolean>(
+            'discard_meeting_if_empty', { meetingId },
+          ).catch((error) => {
+            console.warn('Empty-recording check failed, keeping the meeting:', error);
+            return false;
+          });
+          if (discarded) {
+            // shortcut: if this IndexedDB mark fails (only logged), recovery may offer the deleted empty meeting; clear the entry directly if that shows up
+            await markMeetingAsSaved();
+            sessionStorage.removeItem('last_recording_folder_path');
+            sessionStorage.removeItem('last_recording_meeting_name');
+            sessionStorage.removeItem('indexeddb_current_meeting_id');
+            await refetchMeetings();
+            clearTranscripts();
+            setStatus(RecordingStatus.IDLE);
+            setIsMeetingActive(false);
+            setIsRecordingDisabled(false);
+            toast.info('Recording had no speech, deleted');
+            router.push('/');
+            return;
           }
 
           let shouldDetectSummaryLanguage = false;

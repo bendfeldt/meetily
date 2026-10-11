@@ -1,8 +1,13 @@
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useRecordingStop } from '@/hooks/useRecordingStop';
+import { useRouter } from 'next/navigation';
+import { toast } from 'sonner';
+import { useSidebar } from '@/components/Sidebar/SidebarProvider';
+import { useConfig } from '@/contexts/ConfigContext';
+import { useRecordingState } from '@/contexts/RecordingStateContext';
 
 /**
  * RecordingPostProcessingProvider
@@ -56,6 +61,45 @@ export function RecordingPostProcessingProvider({ children }: { children: React.
       }
     };
   }, [handleRecordingStop]);
+
+  // Fork (bendfeldt/meetily): results of the after-meeting worker for
+  // record-only recordings. Latest values live in refs so the listeners are
+  // registered once and no event is dropped while re-subscribing.
+  const router = useRouter();
+  const { refetchMeetings } = useSidebar();
+  const { isAutoSummary } = useConfig();
+  const { isRecording } = useRecordingState();
+  const latest = useRef({ router, refetchMeetings, isAutoSummary, isRecording });
+  latest.current = { router, refetchMeetings, isAutoSummary, isRecording };
+  useEffect(() => {
+    type Payload = { meeting_id: string | null; error?: string };
+    const unlisteners = [
+      listen<Payload>('meeting-saved', () => { latest.current.refetchMeetings(); }),
+      listen<Payload>('meeting-ready', async (event) => {
+        const { refetchMeetings, isAutoSummary, isRecording, router } = latest.current;
+        await refetchMeetings();
+        // Never pull the user off a running recording.
+        if (isAutoSummary && !isRecording && event.payload.meeting_id) {
+          router.push(`/meeting-details?id=${event.payload.meeting_id}&source=recording`);
+        } else {
+          toast.success('Meeting transcribed');
+        }
+      }),
+      listen<Payload>('meeting-discarded', async () => {
+        await latest.current.refetchMeetings();
+        toast.info('Recording had no speech, deleted');
+      }),
+      listen<Payload>('meeting-transcription-failed', async (event) => {
+        await latest.current.refetchMeetings();
+        toast.error(event.payload.meeting_id
+          ? 'Transcription failed, retry from the meeting page'
+          : 'Recording could not be transcribed', {
+          description: event.payload.error,
+        });
+      }),
+    ];
+    return () => { unlisteners.forEach((p) => p.then((unlisten) => unlisten())); };
+  }, []);
 
   return <>{children}</>;
 }

@@ -1,0 +1,61 @@
+# Fork-only (bendfeldt/meetily): compile, lint and unit-test the Rust core on
+# macOS, so macOS-only code (#[cfg(target_os = "macos")], cidre, NSPanel) is
+# checked even though development happens on Linux. Not part of upstream.
+name: "Fork - macOS Rust checks"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["enhance/**", "fix/**"]
+    paths:
+      - "frontend/src-tauri/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/fork-macos-rust-checks.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-macos:
+    name: cargo check / clippy / test (macOS arm64)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: fork-macos-rust-checks
+
+      # tauri-build only checks that these paths exist; the real artifacts are
+      # produced by the release workflows. build.rs downloads FFmpeg itself.
+      - name: Placeholders for frontendDist and the llama-helper sidecar
+        run: |
+          mkdir -p frontend/out frontend/src-tauri/binaries
+          touch frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+          chmod +x frontend/src-tauri/binaries/llama-helper-aarch64-apple-darwin
+
+      - name: cargo check
+        run: cargo check -p meetily --all-targets
+
+      # Report-only: upstream code has existing warnings. Review new warnings
+      # in changed files from the log.
+      - name: cargo clippy
+        run: cargo clippy -p meetily --all-targets
+        continue-on-error: true
+
+      - name: cargo test
+        run: cargo test -p meetily

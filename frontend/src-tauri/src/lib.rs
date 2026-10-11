@@ -40,8 +40,15 @@ pub mod api;
 pub mod audio;
 pub mod config;
 pub mod console_utils;
+pub mod after_meeting; // fork-only (bendfeldt/meetily)
 pub mod database;
+pub mod empty_recordings; // fork-only (bendfeldt/meetily)
+pub mod fork_settings; // fork-only (bendfeldt/meetily)
 pub mod notifications;
+pub mod meeting_detector; // fork-only (bendfeldt/meetily)
+#[cfg(target_os = "macos")]
+pub mod meeting_prompt; // fork-only (bendfeldt/meetily)
+pub mod obsidian_export; // fork-only (bendfeldt/meetily)
 pub mod ollama;
 pub mod onboarding;
 pub mod openai;
@@ -511,6 +518,35 @@ pub fn run() {
                 log::error!("Failed to create system tray: {}", e);
             }
 
+            // Fork-only (bendfeldt/meetily): Teams meeting pop-up. Without the
+            // panel the detector does not run (no silent substitute).
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_notification::NotificationExt;
+                let handle = _app.handle();
+                let ready = handle
+                    .plugin(tauri_nspanel::init())
+                    .and_then(|_| meeting_prompt::create(handle));
+                match ready {
+                    Ok(()) => meeting_detector::start(handle.clone()),
+                    Err(e) => {
+                        log::error!("Teams meeting pop-up unavailable: {}", e);
+                        // Only users who turned the pop-up on are told.
+                        if fork_settings::load(handle).teams_prompt_enabled {
+                            if let Err(e) = handle
+                                .notification()
+                                .builder()
+                                .title("meetily")
+                                .body("The Teams meeting pop-up could not start; see the log.")
+                                .show()
+                            {
+                                log::error!("Cannot show notification: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
             let app_for_notif = _app.handle().clone();
@@ -763,6 +799,13 @@ pub fn run() {
             summary::summary_engine::commands::builtin_ai_get_available_summary_model,
             summary::summary_engine::commands::builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
+            obsidian_export::export_meeting_markdown,
+            obsidian_export::choose_obsidian_export_folder,
+            empty_recordings::discard_meeting_if_empty,
+            after_meeting::last_recording_was_record_only,
+            fork_settings::get_fork_settings,
+            fork_settings::set_teams_prompt_enabled,
+            meeting_detector::meeting_prompt_respond,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
             audio::recording_preferences::get_default_recordings_folder_path,

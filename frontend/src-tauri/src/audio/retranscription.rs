@@ -26,6 +26,9 @@ static RETRANSCRIPTION_CANCELLED: AtomicBool = AtomicBool::new(false);
 /// Ensures flag is cleared even if retranscription panics or returns early
 struct RetranscriptionGuard;
 
+// Fork (bendfeldt/meetily): error prefix the after-meeting worker matches on.
+pub const ALREADY_IN_PROGRESS: &str = "Retranscription already in progress";
+
 impl RetranscriptionGuard {
     /// Create guard and set flag atomically
     fn acquire() -> Result<Self, String> {
@@ -33,7 +36,7 @@ impl RetranscriptionGuard {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            return Err("Retranscription already in progress".to_string());
+            return Err(ALREADY_IN_PROGRESS.to_string());
         }
         Ok(RetranscriptionGuard)
     }
@@ -113,6 +116,14 @@ pub async fn start_retranscription<R: Runtime>(
 
     match &result {
         Ok(res) => {
+            // fork-only (bendfeldt/meetily): refresh an exported Obsidian note.
+            if let Some(state) = app.try_state::<AppState>() {
+                crate::obsidian_export::spawn_sync_if_exported(
+                    app.clone(),
+                    state.db_manager.pool().clone(),
+                    res.meeting_id.clone(),
+                );
+            }
             let _ = app.emit(
                 "retranscription-complete",
                 serde_json::json!({

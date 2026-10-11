@@ -62,6 +62,7 @@ Run from the repository root unless noted. Pick the ones the diff touches.
 | UI types | `cd frontend && pnpm exec tsc --noEmit` | When the diff touches `frontend/src` |
 | UI tests | `.claude/scripts/frontend-tests.sh` | One Bun process per file + `node --test` for `.mjs`. A single `bun test` run leaks mocks between files and fails |
 | UI deps | `cd frontend && pnpm install --frozen-lockfile` | Never regenerate `pnpm-lock.yaml` by hand |
+| macOS Rust | push to an `enhance/**` / `fix/**` branch → GitHub Actions `fork-macos-rust-checks.yml` | The only place `#[cfg(target_os = "macos")]` code is compiled and tested; Linux `cargo check` skips it. Read the run result before claiming macOS code works |
 | Full app | `cd frontend && pnpm run tauri:dev` | Needs a desktop session, audio devices and OS permissions; only when authorized |
 
 A change to a Tauri command's signature or an emitted event payload touches

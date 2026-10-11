@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion } from 'framer-motion';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
 import { RecordingSettings } from '@/components/RecordingSettings';
+import { ForkSettings } from '@/components/ForkSettings';
 import { PreferenceSettings } from '@/components/PreferenceSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
 import { BetaSettings } from '@/components/BetaSettings';
@@ -114,6 +115,7 @@ export default function SettingsPage() {
             </TabsContent>
             <TabsContent value="recording">
               <RecordingSettings />
+              <div className="mt-6"><ForkSettings /></div>
             </TabsContent>
             <TabsContent value="Transcriptionmodels">
               <TranscriptSettings

@@ -13,9 +13,105 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
 
 ## Next steps
 
-- None agreed yet. Run `/spec` before starting the next feature.
+- Proposed: Teams meeting prompt → record → transcribe after → Obsidian
+  note, see `docs/plans/teams-auto-capture.md` (revision 5). Decided: macOS
+  only, verified by the fork macOS CI (no live Mac testing); live
+  transcription fallback for cloud providers; notes renamed with the title;
+  Obsidian export opt-in per meeting via a button.
+- Step 1 done: `.github/workflows/fork-macos-rust-checks.yml` (cargo check,
+  clippy report-only, cargo test on macos-latest) green on unchanged upstream
+  code (run 38088365544).
+- Step 2 done: opt-in Obsidian export. `fork_settings.rs` (own store file),
+  `obsidian_export.rs` (render, file naming, find-by-id, rename, sync), an
+  "Obsidian" button in the meeting transcript toolbar (folder chosen on
+  first export, changed in Settings), sync hooks on summary generation/edit and title edit.
+  Two independent reviews; accepted shortcuts are marked `shortcut:` in
+  `obsidian_export.rs` (`/ponytail-debt` lists them).
+- Step 3 done: empty manual recordings are deleted (`empty_recordings.rs`):
+  only when the VAD reported no speech and no VAD error for that recording;
+  folder removed only inside the recordings root and when not shared.
+  Hooks: `RecordingManager::start_recording`, `pipeline.rs` (VAD segments
+  and errors), `stop_recording`.
+- Step 4 done: record-only pop-up recordings (`after_meeting.rs`).
+  `start_popup_recording` (called by the step 5 detector)
+  starts with the preferred devices; record-only when the
+  provider can batch (localWhisper/whisper/parakeet), live otherwise. No
+  live transcription task; audio save forced. On stop, a FIFO worker saves
+  the meeting, waits while any recording runs, batch-transcribes with the
+  configured model/language, and emits meeting-ready / meeting-discarded /
+  meeting-transcription-failed. Emptiness uses the step-3 VAD evidence;
+  batch "no audio"/"no speech" keeps the meeting. Uses upstream's beta
+  retranscribe engine regardless of the beta toggle.
+  The record-only request is bound to the pop-up's meeting name, so a
+  concurrent manual start cannot take it. Emptiness inherits step 3's
+  documented VAD limits (bursts under 250 ms, the last <600 ms window).
+- Step 5 done: Teams detector (`meeting_detector.rs`: pure state
+  machine + 0.5 s CoreAudio poll of `com.microsoft.teams*` processes with
+  an active input stream), non-activating NSPanel pop-up
+  (`meeting_prompt.rs`, `public/meeting-prompt.html`, `tauri-nspanel` pinned
+  to 18ffb9a), Settings section (`ForkSettings.tsx`: toggle, off by
+  default; export folder). Auto-stop 5 s after Teams releases the mic, or
+  after 4 h at most (Teams has been reported to keep the mic open after a
+  call). As built, differing from docs/plans/teams-auto-capture.md:
+  - The pop-up is a static `public/meeting-prompt.html` + `.js`, not a Next
+    page, so the app layout and providers do not load into it.
+  - The panel is created at startup on macOS (one user, one Mac; ultra
+    review trim). If it fails, a notification says so and the detector
+    does not run. It has its own `meeting-prompt` capability
+    (`core:default`, no plugin access). App commands stay callable from it,
+    as from the main window: the app has no app manifest, so Tauri does not
+    gate app commands for local pages.
+  - "Not now" lasts until Teams has released the mic for 5 s (the end
+    grace), so a brief mic flap does not re-prompt.
+  - The stop emits `recording-stop-complete` like the tray; record-only
+    stops are skipped by the frontend's `last_recording_was_record_only`
+    check.
+  - A failed auto-stop keeps managing the recording and retries after
+    another end grace (or another 4 h); notifies once. A stop error while
+    no recording runs (stopped from the tray at the same moment) counts as
+    stopped.
+  - On macOS < 14 (no CoreAudio process listing) the detector logs once
+    and never prompts.
+  - A 4 h cap stop returns to Idle, so a call still running asks again.
+  - The detector loop reads `fork_settings.json` every 0.5 s even when off
+    (an in-memory store read; a broken store warns once).
 
 ## Evidence gaps
+
+- Obsidian export of a meeting whose summary is stored without Markdown
+  (older upstream format, or an editor save whose Markdown conversion
+  failed) fails with a message to re-save or regenerate the summary,
+  so an existing note never loses its summary on sync (a background sync
+  only logs a warning, the note stays as it was). A stored summary whose
+  Markdown is empty after cleaning is treated as no summary.
+- If the Teams pop-up panel cannot be created at startup, a notification
+  is shown only when "Ask to record Teams meetings" is on; otherwise it is
+  only logged.
+
+- Obsidian export not exercised in the running app (no desktop session):
+  folder picker, button, toast, and sync after summary/title changes are
+  covered only by unit tests of the pure parts.
+- Teams behaviour (research 2026-10-11, Microsoft Learn + Notion, see
+  docs/plans/teams-auto-capture.md): bundle ids documented
+  (com.microsoft.teams2, classic com.microsoft.teams; helper
+  com.microsoft.teams2.helper per Talos). NOT documented: mic opened on the
+  pre-join screen, mic held while muted (indirect evidence only: "you're
+  muted" warning), mic released on leave (user reports say it can stay
+  held), which process owns the stream. "Don't use audio" / room / phone
+  audio give no signal. All assumed, untested until a real call.
+- Pop-up over full-screen Spaces and focus behaviour: macOS CI compiles it;
+  not exercised on a Mac.
+- Empty-recording deletion not exercised with real audio: silence vs. speech
+  detection relies on upstream's VAD, covered only by unit tests of the rule
+  and the delete path.
+- Record-only flow not exercised in the running app: start, batch
+  transcription, and the worker events are covered only by unit tests of
+  the pure parts. Known upstream-level risks kept: a recording started
+  during a batch job can unload the engine under it; a failed
+  `stop_recording` (stream stop error) leaves `IS_RECORDING` set, which
+  also blocks the worker.
+- Edits made to an exported note in Obsidian are overwritten on the next
+  sync (accepted). Changing the export folder leaves old notes unsynced.
 
 - `cargo check` / `cargo test` for `frontend/src-tauri` not yet run in a
   cloud session (heavy native build).
