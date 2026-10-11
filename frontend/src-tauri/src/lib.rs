@@ -407,26 +407,6 @@ fn read_audio_file(file_path: String) -> Result<Vec<u8>, String> {
     }
 }
 
-#[tauri::command]
-async fn save_transcript(file_path: String, content: String) -> Result<(), String> {
-    log_info!("Saving transcript");
-
-    // Ensure parent directory exists
-    if let Some(parent) = std::path::Path::new(&file_path).parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory: {}", e))?;
-        }
-    }
-
-    // Write content to file
-    std::fs::write(&file_path, content)
-        .map_err(|e| format!("Failed to write transcript: {}", e))?;
-
-    log_info!("Transcript saved successfully");
-    Ok(())
-}
-
 // Audio level monitoring commands
 #[tauri::command]
 async fn start_audio_level_monitoring<R: Runtime>(
@@ -739,7 +719,6 @@ pub fn run() {
             is_recording,
             get_transcription_status,
             read_audio_file,
-            save_transcript,
             analytics::commands::init_analytics,
             analytics::commands::disable_analytics,
             analytics::commands::track_event,

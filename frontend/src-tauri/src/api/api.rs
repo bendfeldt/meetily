@@ -1155,12 +1155,23 @@ pub async fn debug_backend_connection<R: Runtime>(app: AppHandle<R>) -> Result<S
     }
 }
 
+/// Only web links may be handed to the OS opener; anything else (local paths,
+/// `file:`, `javascript:`) could launch an arbitrary app or file.
+fn is_allowed_external_url(url: &str) -> bool {
+    url.starts_with("https://")
+}
+
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     use std::process::Command;
 
+    if !is_allowed_external_url(&url) {
+        return Err("Only https:// URLs can be opened".to_string());
+    }
+
     let result = if cfg!(target_os = "windows") {
-        Command::new("cmd").args(&["/C", "start", &url]).output()
+        // Not `cmd /C start`: cmd treats `&` in the URL as a command separator.
+        Command::new("explorer").arg(&url).output()
     } else if cfg!(target_os = "macos") {
         Command::new("open").arg(&url).output()
     } else {
@@ -1399,5 +1410,23 @@ pub async fn api_test_custom_openai_connection<R: Runtime>(
                 Err(format!("Connection failed: {}", error))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_external_url;
+
+    #[test]
+    fn external_url_accepts_https_only() {
+        assert!(is_allowed_external_url("https://ollama.com/download"));
+        assert!(is_allowed_external_url(
+            "https://meetily.zackriya.com/#about"
+        ));
+        assert!(!is_allowed_external_url("file:///etc/passwd"));
+        assert!(!is_allowed_external_url("/Applications/Calculator.app"));
+        assert!(!is_allowed_external_url("javascript:alert(1)"));
+        assert!(!is_allowed_external_url("http://example.com"));
+        assert!(!is_allowed_external_url(""));
     }
 }
