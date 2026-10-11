@@ -789,7 +789,6 @@ pub fn run() {
             obsidian_export::export_meeting_markdown,
             obsidian_export::choose_obsidian_export_folder,
             empty_recordings::discard_meeting_if_empty,
-            after_meeting::start_popup_recording_command,
             after_meeting::last_recording_was_record_only,
             fork_settings::get_fork_settings,
             fork_settings::set_teams_prompt_enabled,

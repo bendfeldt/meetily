@@ -23,9 +23,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
-use crate::audio::retranscription::{
-    start_retranscription, ALREADY_IN_PROGRESS, NO_AUDIO_FILE, NO_SPEECH,
-};
+use crate::audio::retranscription::{start_retranscription, ALREADY_IN_PROGRESS};
 use crate::database::repositories::{
     setting::SettingsRepository, transcript::TranscriptsRepository,
 };
@@ -136,15 +134,6 @@ pub async fn start_popup_recording<R: Runtime>(
     result.map(|_| record_only)
 }
 
-/// Debug/manual entry point until the Teams detector exists (plan step 5).
-#[tauri::command]
-pub async fn start_popup_recording_command<R: Runtime>(
-    app: AppHandle<R>,
-    meeting_name: String,
-) -> Result<bool, String> {
-    start_popup_recording(app, meeting_name).await
-}
-
 /// Lets the frontend stop handler skip its live-transcript save for a
 /// record-only recording (the worker saves it).
 #[tauri::command]
@@ -213,12 +202,10 @@ fn classify(result: &anyhow::Result<()>) -> Outcome {
         Ok(()) => Outcome::Transcribed,
         Err(e) => {
             let msg = e.to_string();
+            // Anything else, including "no speech" from the batch, is a
+            // failure: the VAD already heard speech, so the meeting is kept.
             if msg.starts_with(ALREADY_IN_PROGRESS) {
                 Outcome::Busy
-            } else if msg.starts_with(NO_AUDIO_FILE) || msg.starts_with(NO_SPEECH) {
-                // The VAD heard speech (else the job was discarded before
-                // transcribing), so this is a failure, not silence.
-                Outcome::Failed(format!("{msg} (the recording had speech; audio kept)"))
             } else {
                 Outcome::Failed(msg)
             }
@@ -319,7 +306,6 @@ async fn process<R: Runtime>(app: &AppHandle<R>, job: Job) {
 
     match outcome {
         Outcome::Transcribed => {
-            crate::obsidian_export::spawn_sync_if_exported(app.clone(), pool, meeting_id.clone());
             let _ = app.emit(
                 "meeting-ready",
                 serde_json::json!({ "meeting_id": meeting_id }),
@@ -353,11 +339,7 @@ mod tests {
             Outcome::Busy
         ));
         assert!(matches!(
-            classify(&err(format!("{NO_AUDIO_FILE} /x"))),
-            Outcome::Failed(_)
-        ));
-        assert!(matches!(
-            classify(&err(NO_SPEECH.into())),
+            classify(&err("No speech detected in audio file".into())),
             Outcome::Failed(_)
         ));
         assert!(matches!(

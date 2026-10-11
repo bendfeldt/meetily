@@ -33,8 +33,8 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   Hooks: `RecordingManager::start_recording`, `pipeline.rs` (VAD segments
   and errors), `stop_recording`.
 - Step 4 done: record-only pop-up recordings (`after_meeting.rs`).
-  `start_popup_recording` (debug command `start_popup_recording_command`
-  until step 5) starts with the preferred devices; record-only when the
+  `start_popup_recording` (called by the step 5 detector)
+  starts with the preferred devices; record-only when the
   provider can batch (localWhisper/whisper/parakeet), live otherwise. No
   live transcription task; audio save forced. On stop, a FIFO worker saves
   the meeting, waits while any recording runs, batch-transcribes with the
