@@ -780,6 +780,7 @@ pub async fn stop_recording<R: Runtime>(
         global_task.take()
     };
 
+    let mut transcription_timed_out = false;
     if let Some(task_handle) = transcription_task {
         info!("⏳ Waiting for ALL transcription chunks to be processed (no timeout - preserving every chunk)");
 
@@ -820,7 +821,16 @@ pub async fn stop_recording<R: Runtime>(
             }
             Err(_) => {
                 warn!("⏱️ Transcription timeout (10 minutes) reached, continuing shutdown to prevent indefinite hang");
-                // Continue shutdown even on timeout - better to lose some chunks than hang forever
+                // Continue shutdown, but leave the model loaded below: the worker is
+                // still draining its backlog and would skip every remaining chunk
+                // as "model not loaded" if we unloaded it now.
+                transcription_timed_out = true;
+                let _ = app.emit("transcription-error", serde_json::json!({
+                    "error": "Transcription did not finish within 10 minutes of stopping",
+                    "userMessage": "Transcription is taking longer than expected. The saved transcript may be missing the end of the meeting.",
+                    "actionable": false,
+                    "phase": "shutdown"
+                }));
             }
         }
 
@@ -865,8 +875,11 @@ pub async fn stop_recording<R: Runtime>(
         }
     };
 
-    match config.as_deref() {
-        Some("parakeet") => {
+    match (transcription_timed_out, config.as_deref()) {
+        (true, _) => {
+            warn!("⚠️ Transcription still running after stop; leaving model loaded so remaining chunks are not dropped");
+        }
+        (_, Some("parakeet")) => {
             info!("🦜 Unloading Parakeet model...");
             let engine_clone = {
                 let engine_guard = crate::parakeet_engine::commands::PARAKEET_ENGINE
