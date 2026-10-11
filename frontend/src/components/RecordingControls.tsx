@@ -161,6 +161,10 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       Analytics.trackTranscriptionSuccess();
       onRecordingStop(true);
     } catch (error) {
+      // Another stop (e.g. from the tray) is running and will finish the flow itself.
+      if (String(error).includes('Stop already in progress')) {
+        return;
+      }
       console.error('Failed to stop recording:', error);
       if (error instanceof Error) {
         console.error('Error details:', {

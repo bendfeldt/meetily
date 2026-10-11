@@ -57,12 +57,6 @@ fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         if crate::is_recording().await {
-            // A stop is already draining; don't report a second completion.
-            if crate::audio::recording_commands::is_stop_in_progress() {
-                log::info!("Tray toggle: Stop already in progress");
-                return;
-            }
-
             // Immediately show stopping state
             set_tray_state(&app_clone, RecordingState::Stopping);
 
@@ -100,6 +94,10 @@ fn toggle_recording_handler<R: Runtime>(app: &AppHandle<R>) {
                     if let Err(e) = app_clone.emit("recording-stop-complete", true) {
                         log::error!("Tray toggle: Failed to emit recording-stop-complete event: {}", e);
                     }
+                }
+                // Another stop is running and will report completion itself.
+                Err(e) if e == crate::audio::recording_commands::STOP_ALREADY_IN_PROGRESS => {
+                    log::info!("Tray toggle: Stop already in progress");
                 }
                 Err(e) => {
                     log::error!("Tray toggle: Failed to stop recording: {}", e);
@@ -162,12 +160,6 @@ fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
     focus_main_window(app);
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        // A stop is already draining; don't report a second completion.
-        if crate::audio::recording_commands::is_stop_in_progress() {
-            log::info!("Tray: Stop already in progress");
-            return;
-        }
-
         log::info!("Tray: Stopping recording...");
 
         // Generate save path (same as RecordingControls.tsx)
@@ -202,6 +194,10 @@ fn stop_recording_handler<R: Runtime>(app: &AppHandle<R>) {
                 if let Err(e) = app_clone.emit("recording-stop-complete", true) {
                     log::error!("Tray: Failed to emit recording-stop-complete event: {}", e);
                 }
+            }
+            // Another stop is running and will report completion itself.
+            Err(e) if e == crate::audio::recording_commands::STOP_ALREADY_IN_PROGRESS => {
+                log::info!("Tray: Stop already in progress");
             }
             Err(e) => {
                 log::error!("Tray: Failed to stop recording: {}", e);

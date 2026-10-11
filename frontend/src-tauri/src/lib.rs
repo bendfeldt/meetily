@@ -375,6 +375,11 @@ async fn stop_recording<R: Runtime>(app: AppHandle<R>, args: RecordingArgs) -> R
 
             Ok(())
         }
+        // Another stop is running; leave its state alone and pass the marker through.
+        Err(e) if e == audio::recording_commands::STOP_ALREADY_IN_PROGRESS => {
+            log_info!("Recording stop already in progress");
+            Err(e)
+        }
         Err(e) => {
             log_error!("Failed to stop audio recording: {}", e);
             // Still update the flag even if stopping failed

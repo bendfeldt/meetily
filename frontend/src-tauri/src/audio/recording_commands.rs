@@ -81,26 +81,25 @@ fn session_live(s: &Arc<super::RecordingState>) -> bool {
 /// (e.g. tray "Stop Recording" clicked while the first is still draining)
 /// gets `None` and must return without touching anything. Only the holder
 /// clears the flag.
-struct StoppingGuard;
+struct StoppingGuard(&'static AtomicBool);
 impl StoppingGuard {
-    fn try_acquire() -> Option<Self> {
-        if IS_RECORDING_STOPPING.swap(true, Ordering::SeqCst) {
+    fn try_acquire(flag: &'static AtomicBool) -> Option<Self> {
+        if flag.swap(true, Ordering::SeqCst) {
             None
         } else {
-            Some(StoppingGuard)
+            Some(StoppingGuard(flag))
         }
     }
 }
-
-/// A stop is already running; callers should not start (or report) another.
-pub fn is_stop_in_progress() -> bool {
-    IS_RECORDING_STOPPING.load(Ordering::SeqCst)
-}
 impl Drop for StoppingGuard {
     fn drop(&mut self) {
-        IS_RECORDING_STOPPING.store(false, Ordering::SeqCst);
+        self.0.store(false, Ordering::SeqCst);
     }
 }
+
+/// `stop_recording` error when another stop is already running. Callers treat
+/// it as a no-op: the running stop reports completion itself.
+pub const STOP_ALREADY_IN_PROGRESS: &str = "Stop already in progress";
 
 /// Shared start-path finalize. Both start commands MUST call this so a new
 /// start path can't silently ship with a per-session flag left unreset (e.g.
@@ -709,9 +708,9 @@ pub async fn stop_recording<R: Runtime>(
     // `recording-stopped`). IS_RECORDING itself stays true until the tail
     // completes — the frontend polls it to keep the stop UI up. RAII so a
     // panic in the tail below can't leave the flag stuck true.
-    let Some(_stopping_guard) = StoppingGuard::try_acquire() else {
+    let Some(_stopping_guard) = StoppingGuard::try_acquire(&IS_RECORDING_STOPPING) else {
         info!("Recording stop already in progress; ignoring duplicate stop");
-        return Ok(());
+        return Err(STOP_ALREADY_IN_PROGRESS.to_string());
     };
 
     // Emit shutdown progress to frontend
@@ -1734,20 +1733,26 @@ mod tests {
 
     #[test]
     fn second_stop_cannot_acquire_stopping_guard_while_first_runs() {
-        let first = StoppingGuard::try_acquire();
+        // Own flag, so this can't race other tests on IS_RECORDING_STOPPING.
+        static FLAG: AtomicBool = AtomicBool::new(false);
+
+        let first = StoppingGuard::try_acquire(&FLAG);
         assert!(first.is_some(), "first stop must acquire the guard");
         assert!(
-            StoppingGuard::try_acquire().is_none(),
+            StoppingGuard::try_acquire(&FLAG).is_none(),
             "a second stop while the first is running must be refused"
         );
-        assert!(IS_RECORDING_STOPPING.load(Ordering::SeqCst));
+        assert!(
+            FLAG.load(Ordering::SeqCst),
+            "a refused stop must not clear the flag"
+        );
 
         drop(first);
-        assert!(!IS_RECORDING_STOPPING.load(Ordering::SeqCst));
+        assert!(!FLAG.load(Ordering::SeqCst));
         assert!(
-            StoppingGuard::try_acquire().is_some(),
+            StoppingGuard::try_acquire(&FLAG).is_some(),
             "a later stop must be able to acquire the guard again"
         );
-        assert!(!IS_RECORDING_STOPPING.load(Ordering::SeqCst));
+        assert!(!FLAG.load(Ordering::SeqCst));
     }
 }
