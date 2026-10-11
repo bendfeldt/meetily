@@ -411,7 +411,7 @@ async fn run_import<R: Runtime>(
     });
 
     let audio_samples = tokio::task::spawn_blocking(move || {
-        decoded.to_whisper_format_with_progress(Some(resample_progress))
+        decoded.into_whisper_format_with_progress(Some(resample_progress))
     })
     .await
     .map_err(|e| anyhow!("Resample task join error: {}", e))?;
@@ -1266,7 +1266,8 @@ mod tests {
 
         // Step 2: Resample to 16kHz mono
         println!("Resampling to 16kHz mono...");
-        let samples = decoded.to_whisper_format();
+        let duration_seconds = decoded.duration_seconds;
+        let samples = decoded.into_whisper_format();
         println!("Resampled: {} samples ({:.2}s at 16kHz)", samples.len(), samples.len() as f64 / 16000.0);
 
         // Step 3: Run VAD with both redemption times and compare
@@ -1299,8 +1300,8 @@ mod tests {
                     "Stats: avg={:.0}ms, min={:.0}ms, max={:.0}ms, total_speech={:.1}s/{:.1}s ({:.0}%)",
                     avg, min, max,
                     total_speech / 1000.0,
-                    decoded.duration_seconds,
-                    (total_speech / 1000.0 / decoded.duration_seconds) * 100.0
+                    duration_seconds,
+                    (total_speech / 1000.0 / duration_seconds) * 100.0
                 );
 
                 // Segments over 25s that would be split

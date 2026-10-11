@@ -220,7 +220,7 @@ async fn run_retranscription<R: Runtime>(
 
     // Convert to 16kHz mono format (CPU-intensive, run in blocking task)
     let audio_samples = tokio::task::spawn_blocking(move || {
-        decoded.to_whisper_format()
+        decoded.into_whisper_format()
     })
     .await
     .map_err(|e| anyhow!("Resample task panicked: {}", e))?;

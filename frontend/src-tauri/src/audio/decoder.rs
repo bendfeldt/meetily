@@ -45,12 +45,18 @@ impl DecodedAudio {
     /// Performs mono conversion, normalization, and resampling. Large files
     /// (>5 min at 48kHz) use chunked sinc resampling to keep memory bounded
     /// while preserving audio quality for downstream VAD and transcription.
-    pub fn to_whisper_format(&self) -> Vec<f32> {
-        self.to_whisper_format_with_progress(None)
+    ///
+    /// Consumes `self` so the decoded buffer is moved, not cloned: for a long
+    /// recording this buffer can be several GB.
+    pub fn into_whisper_format(self) -> Vec<f32> {
+        self.into_whisper_format_with_progress(None)
     }
 
     /// Convert decoded audio to Whisper format with optional progress callback
-    pub fn to_whisper_format_with_progress(&self, progress_callback: Option<ProgressCallback>) -> Vec<f32> {
+    pub fn into_whisper_format_with_progress(
+        self,
+        progress_callback: Option<ProgressCallback>,
+    ) -> Vec<f32> {
         // Step 1: Convert to mono if needed
         let mono_samples = if self.channels > 1 {
             info!(
@@ -58,9 +64,12 @@ impl DecodedAudio {
                 self.channels,
                 self.samples.len()
             );
-            audio_to_mono(&self.samples, self.channels)
+            let mono = audio_to_mono(&self.samples, self.channels);
+            // Free the interleaved buffer before resampling to lower peak memory
+            drop(self.samples);
+            mono
         } else {
-            self.samples.clone()
+            self.samples
         };
 
         // Step 1.5: Normalize samples to valid range (-1.0 to 1.0)
@@ -616,7 +625,7 @@ mod tests {
         );
 
         // The 16 kHz conversion must preserve the real duration as well.
-        let whisper_samples = decoded.to_whisper_format();
+        let whisper_samples = decoded.into_whisper_format();
         let duration_16k = whisper_samples.len() as f64 / 16000.0;
         assert!(
             (duration_16k - 5.16).abs() < 0.5,
@@ -635,8 +644,29 @@ mod tests {
             duration_seconds: 0.0001875,
         };
 
-        let result = audio.to_whisper_format();
+        let result = audio.into_whisper_format();
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_into_whisper_format_mono_16k_reuses_buffer() {
+        // Mono 16 kHz input is already Whisper format: the samples must come
+        // back unchanged and in the same allocation (no copy of a multi-GB buffer).
+        let audio = DecodedAudio {
+            samples: vec![0.1, -0.2, 0.3],
+            sample_rate: 16000,
+            channels: 1,
+            duration_seconds: 0.0001875,
+        };
+        let original_ptr = audio.samples.as_ptr();
+
+        let result = audio.into_whisper_format();
+        assert_eq!(result, vec![0.1, -0.2, 0.3]);
+        assert_eq!(
+            result.as_ptr(),
+            original_ptr,
+            "samples were copied instead of moved"
+        );
     }
 
     #[test]
@@ -649,7 +679,7 @@ mod tests {
             duration_seconds: 0.000125,
         };
 
-        let result = audio.to_whisper_format();
+        let result = audio.into_whisper_format();
         assert_eq!(result.len(), 2); // Should be mono now
         // Average of (0.2, 0.4) = 0.3 and (0.6, 0.8) = 0.7
         assert!((result[0] - 0.3).abs() < 0.001);
@@ -668,7 +698,7 @@ mod tests {
             duration_seconds: 4800.0 / 48000.0,
         };
 
-        let result = audio.to_whisper_format();
+        let result = audio.into_whisper_format();
         // Output length should be approximately input_len / 3 (16000/48000 ratio)
         // 4800 / 3 = 1600
         assert!(!result.is_empty(), "Result should not be empty");
@@ -801,7 +831,7 @@ mod tests {
             duration_seconds: 1000.0 / 48000.0,
         };
 
-        let result = audio.to_whisper_format();
+        let result = audio.into_whisper_format();
         // Should complete without error and produce valid output
         assert!(!result.is_empty());
         assert!(result.len() < 1000); // Downsampled
