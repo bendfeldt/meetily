@@ -114,8 +114,14 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
       // Parse error message to provide user-friendly feedback
       const errorMsg = error instanceof Error ? error.message : String(error);
 
+      // Backend refused with a user-facing reason (e.g. a re-transcription is running)
+      if (errorMsg.startsWith('Recording cannot start: ')) {
+        setDeviceError({
+          title: 'Recording Not Started',
+          message: errorMsg.slice('Recording cannot start: '.length)
+        });
       // Check for device-related errors
-      if (errorMsg.includes('microphone') || errorMsg.includes('mic') || errorMsg.includes('input')) {
+      } else if (errorMsg.includes('microphone') || errorMsg.includes('mic') || errorMsg.includes('input')) {
         setDeviceError({
           title: 'Microphone Not Available',
           message: 'Unable to access your microphone. Please check that:\n• Your microphone is connected\n• The app has microphone permissions\n• No other app is using the microphone'

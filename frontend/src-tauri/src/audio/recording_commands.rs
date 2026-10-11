@@ -327,17 +327,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         super::retranscription::is_retranscription_in_progress(),
         super::import::is_import_in_progress(),
     ) {
-        // Non-actionable transcription-error is shown as a toast (useModalState)
-        let _ = app.emit(
-            "transcription-error",
-            serde_json::json!({
-                "error": reason,
-                "userMessage": format!("Recording cannot start: {}", reason),
-                "actionable": false,
-                "phase": "startup"
-            }),
-        );
-        return Err(reason.to_string());
+        // The UI shows errors with this prefix as-is (RecordingControls)
+        return Err(format!("Recording cannot start: {}", reason));
     }
 
     if let Err(error) = crate::ensure_onnx_runtime_available() {
@@ -537,17 +528,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         super::retranscription::is_retranscription_in_progress(),
         super::import::is_import_in_progress(),
     ) {
-        // Non-actionable transcription-error is shown as a toast (useModalState)
-        let _ = app.emit(
-            "transcription-error",
-            serde_json::json!({
-                "error": reason,
-                "userMessage": format!("Recording cannot start: {}", reason),
-                "actionable": false,
-                "phase": "startup"
-            }),
-        );
-        return Err(reason.to_string());
+        // The UI shows errors with this prefix as-is (RecordingControls)
+        return Err(format!("Recording cannot start: {}", reason));
     }
 
     if let Err(error) = crate::ensure_onnx_runtime_available() {

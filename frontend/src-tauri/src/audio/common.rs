@@ -3,6 +3,7 @@ use anyhow::Result;
 use log::{debug, info};
 use once_cell::sync::Lazy;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
@@ -30,6 +31,37 @@ pub(crate) fn engine_busy_reason(
         Some("Wait for the audio import to finish first. It uses the same transcription model.")
     } else {
         None
+    }
+}
+
+/// RAII guard for a batch job's (retranscription or import) in-progress flag.
+/// Clears the flag on drop, even if the job panics or returns early.
+pub(crate) struct BatchFlagGuard(&'static AtomicBool);
+
+impl BatchFlagGuard {
+    /// Set `flag` unless it is already set or `busy` names another engine user.
+    /// Call while holding the engine lifecycle lock: recording start holds it
+    /// from its busy check until IS_RECORDING is set, so the two can't both pass.
+    pub(crate) fn claim(
+        flag: &'static AtomicBool,
+        already_running: &str,
+        busy: Option<&'static str>,
+    ) -> Result<Self, String> {
+        if flag.load(Ordering::SeqCst) {
+            return Err(already_running.to_string());
+        }
+        if let Some(reason) = busy {
+            return Err(reason.to_string());
+        }
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| already_running.to_string())?;
+        Ok(Self(flag))
+    }
+}
+
+impl Drop for BatchFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -273,5 +305,28 @@ mod tests {
         ] {
             assert!(!reason.unwrap().contains("already in progress"));
         }
+    }
+
+    #[test]
+    fn test_batch_flag_guard_refuses_busy_engine_and_releases_on_drop() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+
+        // Engine busy: refused, flag left clear.
+        let busy = engine_busy_reason(true, false, false);
+        assert_eq!(
+            BatchFlagGuard::claim(&FLAG, "Job already in progress", busy).err(),
+            busy.map(str::to_string)
+        );
+        assert!(!FLAG.load(Ordering::SeqCst));
+
+        // Engine free: claimed, a second claim is refused, drop releases.
+        let guard = BatchFlagGuard::claim(&FLAG, "Job already in progress", None).unwrap();
+        assert!(FLAG.load(Ordering::SeqCst));
+        assert_eq!(
+            BatchFlagGuard::claim(&FLAG, "Job already in progress", None).err(),
+            Some("Job already in progress".to_string())
+        );
+        drop(guard);
+        assert!(!FLAG.load(Ordering::SeqCst));
     }
 }

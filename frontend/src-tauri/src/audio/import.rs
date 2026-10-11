@@ -18,6 +18,7 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use super::audio_processing::create_meeting_folder;
+use super::common::BatchFlagGuard;
 use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
 use super::recording_preferences::get_default_recordings_folder;
@@ -27,29 +28,6 @@ static IMPORT_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Global flag to signal cancellation
 static IMPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
-
-/// RAII guard for IMPORT_IN_PROGRESS flag
-/// Ensures flag is cleared even if import panics or returns early
-struct ImportGuard;
-
-impl ImportGuard {
-    /// Create guard and set flag atomically
-    fn acquire() -> Result<Self, String> {
-        if IMPORT_IN_PROGRESS
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return Err("Import already in progress".to_string());
-        }
-        Ok(ImportGuard)
-    }
-}
-
-impl Drop for ImportGuard {
-    fn drop(&mut self) {
-        IMPORT_IN_PROGRESS.store(false, Ordering::SeqCst);
-    }
-}
 
 /// VAD redemption time in milliseconds - bridges natural pauses in speech
 /// Batch processing needs longer redemption (2000ms) than the live pipeline
@@ -251,8 +229,10 @@ fn extract_duration_from_metadata(path: &Path) -> Result<f64> {
     Ok(duration_seconds)
 }
 
-/// Start import of an audio file
-pub async fn start_import<R: Runtime>(
+/// Start import of an audio file. `_guard` holds IMPORT_IN_PROGRESS (claimed
+/// by the command) until the job ends.
+pub(crate) async fn start_import<R: Runtime>(
+    _guard: BatchFlagGuard,
     app: AppHandle<R>,
     source_path: String,
     title: String,
@@ -260,9 +240,6 @@ pub async fn start_import<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<ImportResult> {
-    // Acquire guard - ensures flag is cleared even on panic/early return
-    let _guard = ImportGuard::acquire().map_err(|e| anyhow!(e))?;
-
     // Reset cancellation flag
     IMPORT_CANCELLED.store(false, Ordering::SeqCst);
 
@@ -970,21 +947,23 @@ pub async fn start_import_audio_command<R: Runtime>(
     model: Option<String>,
     provider: Option<String>,
 ) -> Result<ImportStarted, String> {
-    // Check if import is already in progress (guard will be acquired in start_import)
-    if IMPORT_IN_PROGRESS.load(Ordering::SeqCst) {
-        return Err("Import already in progress".to_string());
-    }
-    if let Some(reason) = super::common::engine_busy_reason(
-        super::recording_commands::is_recording().await,
-        super::retranscription::is_retranscription_in_progress(),
-        false,
-    ) {
-        return Err(reason.to_string());
-    }
+    // Claim the flag before spawning so a recording or retranscription can't start in between
+    let guard = {
+        let _engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
+        BatchFlagGuard::claim(
+            &IMPORT_IN_PROGRESS,
+            "Import already in progress",
+            super::common::engine_busy_reason(
+                super::recording_commands::is_recording().await,
+                super::retranscription::is_retranscription_in_progress(),
+                false,
+            ),
+        )?
+    };
 
     // Spawn import in background
     tauri::async_runtime::spawn(async move {
-        let result = start_import(app, source_path, title, language, model, provider).await;
+        let result = start_import(guard, app, source_path, title, language, model, provider).await;
 
         if let Err(e) = result {
             error!("Import failed: {}", e);
