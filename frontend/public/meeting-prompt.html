@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- Fork-only (bendfeldt/meetily): Teams meeting pop-up, shown as a
+     non-activating NSPanel by src-tauri/src/meeting_prompt.rs. Plain HTML so
+     the app's layout (sidebar, providers) is not loaded into the pop-up. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teams meeting detected</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #ffffff; --fg: #111827; --muted: #4b5563; --border: #d1d5db; --primary: #2563eb; --primary-fg: #ffffff; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #1f2937; --fg: #f9fafb; --muted: #d1d5db; --border: #4b5563; --primary: #3b82f6; }
+    }
+    html, body { margin: 0; height: 100%; background: transparent; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+    main { box-sizing: border-box; height: 100%; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--border);
+           background: var(--bg); color: var(--fg); display: flex; flex-direction: column; justify-content: space-between; }
+    h1 { margin: 0; font-size: 14px; font-weight: 600; }
+    p { margin: 2px 0 0; color: var(--muted); }
+    .actions { display: flex; gap: 8px; justify-content: flex-end; }
+    button { font: inherit; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--fg); cursor: pointer; }
+    button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-fg); font-weight: 600; }
+    button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  </style>
+</head>
+<body>
+  <main role="dialog" aria-labelledby="title" aria-describedby="desc">
+    <div>
+      <h1 id="title">Teams meeting detected</h1>
+      <p id="desc">Record it with meetily? Stops when the meeting ends.</p>
+    </div>
+    <div class="actions">
+      <button type="button" id="dismiss">Not now</button>
+      <button type="button" id="record" class="primary">Record</button>
+    </div>
+  </main>
+  <script src="/meeting-prompt.js"></script>
+</body>
+</html>

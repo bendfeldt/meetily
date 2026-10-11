@@ -45,6 +45,9 @@ pub mod database;
 pub mod empty_recordings; // fork-only (bendfeldt/meetily)
 pub mod fork_settings; // fork-only (bendfeldt/meetily)
 pub mod notifications;
+pub mod meeting_detector; // fork-only (bendfeldt/meetily)
+#[cfg(target_os = "macos")]
+pub mod meeting_prompt; // fork-only (bendfeldt/meetily)
 pub mod obsidian_export; // fork-only (bendfeldt/meetily)
 pub mod ollama;
 pub mod onboarding;
@@ -515,6 +518,20 @@ pub fn run() {
                 log::error!("Failed to create system tray: {}", e);
             }
 
+            // Fork-only (bendfeldt/meetily): Teams meeting pop-up. Without the
+            // panel the detector does not run (no silent substitute).
+            #[cfg(target_os = "macos")]
+            {
+                let handle = _app.handle();
+                let ready = handle
+                    .plugin(tauri_nspanel::init())
+                    .and_then(|_| meeting_prompt::create(handle));
+                match ready {
+                    Ok(()) => meeting_detector::start(handle.clone()),
+                    Err(e) => log::error!("Teams meeting pop-up unavailable: {}", e),
+                }
+            }
+
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
             let app_for_notif = _app.handle().clone();
@@ -768,9 +785,13 @@ pub fn run() {
             summary::summary_engine::commands::builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
             obsidian_export::export_meeting_markdown,
+            obsidian_export::choose_obsidian_export_folder,
             empty_recordings::discard_meeting_if_empty,
             after_meeting::start_popup_recording_command,
             after_meeting::last_recording_was_record_only,
+            fork_settings::get_fork_settings,
+            fork_settings::set_fork_settings,
+            meeting_detector::meeting_prompt_respond,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
             audio::recording_preferences::get_default_recordings_folder_path,

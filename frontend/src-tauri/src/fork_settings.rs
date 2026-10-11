@@ -1,7 +1,7 @@
 //! Fork-only settings (bendfeldt/meetily), kept out of upstream's
 //! `RecordingPreferences` so its settings page cannot wipe them and upstream
-//! syncs don't conflict. Stored in its own tauri-plugin-store file. The
-//! Settings UI for these arrives with the Teams toggle (plan step 5).
+//! syncs don't conflict. Stored in its own tauri-plugin-store file and
+//! edited in Settings → Recording (`ForkSettings.tsx`).
 
 use std::path::PathBuf;
 
@@ -17,6 +17,9 @@ pub struct ForkSettings {
     /// Folder (usually inside an Obsidian vault) that meeting notes go to.
     #[serde(default)]
     pub obsidian_export_folder: Option<PathBuf>,
+    /// Show the "Record this Teams meeting?" pop-up (macOS). Off by default.
+    #[serde(default)]
+    pub teams_prompt_enabled: bool,
 }
 
 pub fn load<R: Runtime>(app: &AppHandle<R>) -> ForkSettings {
@@ -42,6 +45,19 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, settings: &ForkSettings) -> anyhow::
     store
         .save()
         .map_err(|e| anyhow::anyhow!("Failed to save {STORE_FILE}: {e}"))
+}
+
+#[tauri::command]
+pub async fn get_fork_settings<R: Runtime>(app: AppHandle<R>) -> Result<ForkSettings, String> {
+    Ok(load(&app))
+}
+
+#[tauri::command]
+pub async fn set_fork_settings<R: Runtime>(
+    app: AppHandle<R>,
+    settings: ForkSettings,
+) -> Result<(), String> {
+    save(&app, &settings).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

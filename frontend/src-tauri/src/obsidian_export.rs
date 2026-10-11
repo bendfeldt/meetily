@@ -399,6 +399,21 @@ async fn pick_folder<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
         .and_then(|path| path.into_path().ok())
 }
 
+/// Settings: choose the export folder. Returns the new folder, or `None` if
+/// the picker was cancelled.
+#[tauri::command]
+pub async fn choose_obsidian_export_folder<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<String>, String> {
+    let Some(dir) = pick_folder(&app).await else {
+        return Ok(None);
+    };
+    let mut settings = fork_settings::load(&app);
+    settings.obsidian_export_folder = Some(dir.clone());
+    fork_settings::save(&app, &settings).map_err(|e| e.to_string())?;
+    Ok(Some(dir.to_string_lossy().into_owned()))
+}
+
 /// Export a meeting note. Asks for the export folder when none is set or when
 /// `choose_folder` is true. Choosing a new folder starts fresh there: notes in
 /// the old folder stay but are no longer synced. Returns the note path, or `None` if the user
