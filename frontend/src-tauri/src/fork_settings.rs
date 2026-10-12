@@ -74,9 +74,27 @@ pub async fn set_teams_prompt_enabled<R: Runtime>(
     save(&app, &settings).map_err(|e| e.to_string())
 }
 
+/// Upstream Meetily's app id. Any other id is a fork build that must keep its
+/// recordings apart so both apps can be installed side by side.
+const UPSTREAM_IDENTIFIER: &str = "com.meetily.ai";
+
+/// Default recordings folder name for this build, or `None` for upstream's.
+pub fn recordings_dir_name_for(identifier: &str) -> Option<&'static str> {
+    (identifier != UPSTREAM_IDENTIFIER).then_some("meetily-fork-recordings")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_builds_get_their_own_recordings_folder() {
+        assert_eq!(recordings_dir_name_for("com.meetily.ai"), None);
+        assert_eq!(
+            recordings_dir_name_for("com.meetily.fork"),
+            Some("meetily-fork-recordings")
+        );
+    }
 
     #[test]
     fn missing_fields_load_as_defaults() {

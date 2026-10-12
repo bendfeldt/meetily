@@ -1,4 +1,6 @@
 {
+  "productName": "Meetily Fork",
+  "identifier": "com.meetily.fork",
   "bundle": {
     "createUpdaterArtifacts": false
   },

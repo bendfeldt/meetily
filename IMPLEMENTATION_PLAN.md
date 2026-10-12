@@ -24,6 +24,12 @@ Keep it short: current state, next steps, evidence gaps. History lives in git.
   Since replaced by `fork-ci.yml` (UI + macOS Rust on every PR/push, check
   "Fork CI result"); app/.dmg builds via `fork-macos-dmg.yml`, see
   `docs/BUILD_DMG.md`.
+- Coexistence with upstream Meetily: fork builds (`tauri.fork.conf.json`)
+  are "Meetily Fork" / `com.meetily.fork` (own data folder, permissions);
+  startup switches the recordings folder to `meetily-fork-recordings` when
+  the app id is not upstream's (fork-marked edit in
+  `recording_preferences.rs` + `lib.rs`). Local builds:
+  `scripts/fork-build-dmg.sh`, VS Code tasks in `.vscode/tasks.json`.
 - Step 2 done: opt-in Obsidian export. `fork_settings.rs` (own store file),
   `obsidian_export.rs` (render, file naming, find-by-id, rename, sync), an
   "Obsidian" button in the meeting transcript toolbar (folder chosen on

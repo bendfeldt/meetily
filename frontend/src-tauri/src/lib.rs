@@ -482,6 +482,12 @@ pub fn run() {
         .manage(audio::init_system_audio_state())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
+            // Fork-only (bendfeldt/meetily): a build with its own identifier
+            // (tauri.fork.conf.json) keeps recordings apart from upstream
+            // Meetily so both apps can be installed side by side.
+            if let Some(name) = fork_settings::recordings_dir_name_for(&_app.config().identifier) {
+                audio::recording_preferences::set_recordings_dir_name(name);
+            }
             #[cfg(target_os = "windows")]
             match _app.path().resolve(
                 "onnxruntime.dll",

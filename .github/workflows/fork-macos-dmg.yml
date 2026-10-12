@@ -129,7 +129,14 @@ jobs:
         run: |
           APP="${{ steps.out.outputs.app }}"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          test -x "$APP/Contents/MacOS/meetily"
+          EXE=$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")
+          test -x "$APP/Contents/MacOS/$EXE"
+          # Fork identity: must stay distinct from upstream Meetily so both
+          # can be installed side by side (see docs/BUILD_DMG.md).
+          ID=$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")
+          echo "App: $(basename "$APP")  id: $ID  executable: $EXE"
+          [ "$ID" = "com.meetily.fork" ] || { echo "::error::bundle id is '$ID', expected com.meetily.fork"; exit 1; }
+          [ "$(basename "$APP")" = "Meetily Fork.app" ] || { echo "::error::app is '$(basename "$APP")', expected 'Meetily Fork.app'"; exit 1; }
           compgen -G "$APP/Contents/MacOS/ffmpeg*" > /dev/null || { echo "::error::ffmpeg sidecar missing"; exit 1; }
           compgen -G "$APP/Contents/MacOS/llama-helper*" > /dev/null || { echo "::error::llama-helper sidecar missing"; exit 1; }
           ls -la "$APP/Contents/MacOS/"
@@ -151,7 +158,8 @@ jobs:
           APP_IN_DMG=$(find "$MNT" -maxdepth 1 -name '*.app' | head -1)
           cp -R "$APP_IN_DMG" "$RUNNER_TEMP/"
           hdiutil detach "$MNT"
-          BIN="$RUNNER_TEMP/$(basename "$APP_IN_DMG")/Contents/MacOS/meetily"
+          COPY="$RUNNER_TEMP/$(basename "$APP_IN_DMG")"
+          BIN="$COPY/Contents/MacOS/$(plutil -extract CFBundleExecutable raw "$COPY/Contents/Info.plist")"
           RUST_LOG=info "$BIN" > "$RUNNER_TEMP/app.log" 2>&1 &
           PID=$!
           sleep 30

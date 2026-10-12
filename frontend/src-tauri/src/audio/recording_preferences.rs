@@ -39,18 +39,34 @@ impl Default for RecordingPreferences {
     }
 }
 
+// Fork (bendfeldt/meetily): folder name of the default recordings folder, so a
+// fork build with its own app identifier does not write into upstream
+// Meetily's folder when both apps are installed. Set once at startup.
+static RECORDINGS_DIR_NAME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+pub fn set_recordings_dir_name(name: &'static str) {
+    let _ = RECORDINGS_DIR_NAME.set(name);
+}
+
+fn recordings_dir_name() -> &'static str {
+    RECORDINGS_DIR_NAME
+        .get()
+        .copied()
+        .unwrap_or("meetily-recordings")
+}
+
 /// Get the default recordings folder based on platform
 pub fn get_default_recordings_folder() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         // Windows: %USERPROFILE%\Music\meetily-recordings
         if let Some(music_dir) = dirs::audio_dir() {
-            music_dir.join("meetily-recordings")
+            music_dir.join(recordings_dir_name())
         } else {
             // Fallback to Documents if Music folder is not available
             dirs::document_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
+                .join(recordings_dir_name())
         }
     }
 
@@ -58,12 +74,12 @@ pub fn get_default_recordings_folder() -> PathBuf {
     {
         // macOS: ~/Movies/meetily-recordings
         if let Some(movies_dir) = dirs::video_dir() {
-            movies_dir.join("meetily-recordings")
+            movies_dir.join(recordings_dir_name())
         } else {
             // Fallback to Documents if Movies folder is not available
             dirs::document_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("meetily-recordings")
+                .join(recordings_dir_name())
         }
     }
 
@@ -72,7 +88,7 @@ pub fn get_default_recordings_folder() -> PathBuf {
         // Linux/Others: ~/Documents/meetily-recordings
         dirs::document_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("meetily-recordings")
+            .join(recordings_dir_name())
     }
 }
 
@@ -385,3 +401,14 @@ pub async fn get_audio_backend_info() -> Result<Vec<BackendInfo>, String> {
     }
 }
 
+#[cfg(test)]
+mod fork_dir_name_tests {
+    use super::*;
+
+    // Only the default: setting the OnceLock here would leak into other tests.
+    #[test]
+    fn default_recordings_folder_keeps_upstream_name_when_unset() {
+        assert_eq!(recordings_dir_name(), "meetily-recordings");
+        assert!(get_default_recordings_folder().ends_with("meetily-recordings"));
+    }
+}

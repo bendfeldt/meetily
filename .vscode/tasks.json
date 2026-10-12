@@ -1,0 +1,59 @@
+{
+  // Fork-only (bendfeldt/meetily). Run with: Cmd+Shift+P → "Tasks: Run Task".
+  // All tasks wrap scripts/fork-build-dmg.sh; see docs/BUILD_DMG.md.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Meetily Fork: build .dmg (release)",
+      "type": "shell",
+      "command": "./scripts/fork-build-dmg.sh",
+      "args": [],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Meetily Fork: build and install to /Applications",
+      "type": "shell",
+      "command": "./scripts/fork-build-dmg.sh",
+      "args": ["--install"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Meetily Fork: build .dmg (debug)",
+      "type": "shell",
+      "command": "./scripts/fork-build-dmg.sh",
+      "args": ["--debug"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Meetily Fork: run in dev mode",
+      "type": "shell",
+      "command": "./scripts/fork-build-dmg.sh",
+      "args": ["--dev"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": false,
+      "problemMatcher": []
+    },
+    {
+      "label": "Meetily Fork: Rust tests",
+      "type": "shell",
+      "command": "cargo test -p meetily --lib",
+      "options": { "cwd": "${workspaceFolder}/frontend/src-tauri" },
+      "group": "test",
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "Meetily Fork: UI checks (types + tests)",
+      "type": "shell",
+      "command": "cd frontend && pnpm exec tsc --noEmit && cd .. && .claude/scripts/frontend-tests.sh",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "test",
+      "problemMatcher": ["$tsc"]
+    }
+  ]
+}
